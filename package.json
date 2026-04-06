@@ -1,0 +1,128 @@
+{
+  "name": "git-lore",
+  "displayName": "Git-Lore",
+  "description": "Chat with your repository's Git history. Privacy-first RAG-powered project intelligence.",
+  "version": "0.1.0",
+  "publisher": "git-lore",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "history",
+    "rag",
+    "ai",
+    "chat",
+    "commits"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "git-lore",
+          "title": "Git-Lore",
+          "icon": "resources/git-lore-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "git-lore": [
+        {
+          "type": "webview",
+          "id": "gitlore.chatView",
+          "name": "Chat",
+          "icon": "resources/git-lore-icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitlore.indexRepository",
+        "title": "Git-Lore: Index Repository"
+      },
+      {
+        "command": "gitlore.clearIndex",
+        "title": "Git-Lore: Clear Index"
+      },
+      {
+        "command": "gitlore.setApiKey",
+        "title": "Git-Lore: Set OpenAI API Key"
+      }
+    ],
+    "configuration": {
+      "title": "Git-Lore",
+      "properties": {
+        "gitlore.llmProvider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "openai"
+          ],
+          "default": "ollama",
+          "description": "LLM provider to use for generating responses."
+        },
+        "gitlore.ollamaEndpoint": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama server endpoint URL."
+        },
+        "gitlore.ollamaModel": {
+          "type": "string",
+          "default": "llama3.2",
+          "description": "Ollama model name to use for chat."
+        },
+        "gitlore.openaiModel": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "OpenAI model name to use for chat."
+        },
+        "gitlore.commitDepth": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 10,
+          "maximum": 10000,
+          "description": "Number of commits to index from the repository history."
+        },
+        "gitlore.topK": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Number of commit snippets to retrieve for each query."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build:extension": "node esbuild.js",
+    "build:webview": "cd src/webview && npx vite build",
+    "compile": "npm run build:extension && npm run build:webview",
+    "watch:extension": "node esbuild.js --watch",
+    "dev:webview": "cd src/webview && npx vite build --watch",
+    "vscode:prepublish": "npm run compile",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "simple-git": "^3.27.0",
+    "@lancedb/lancedb": "^0.13.0",
+    "@huggingface/transformers": "^3.4.1",
+    "openai": "^4.77.0",
+    "apache-arrow": "^17.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.24.0",
+    "vite": "^6.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.0"
+  }
+}
