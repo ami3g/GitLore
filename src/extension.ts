@@ -42,6 +42,12 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gitlore.summarizeRecent', async () => {
+      await chatViewProvider.handleSummarizeRecent();
+    })
+  );
+
   // Listen for config changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {

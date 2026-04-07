@@ -58,6 +58,11 @@ body {
   opacity: 0.8;
 }
 
+.status-bar__actions {
+  display: flex;
+  gap: 6px;
+}
+
 .status-bar__button {
   padding: 3px 10px;
   font-size: 11px;
@@ -66,6 +71,15 @@ body {
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
   cursor: pointer;
+}
+
+.status-bar__button--secondary {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.status-bar__button--secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
 }
 
 .status-bar__button:hover:not(:disabled) {

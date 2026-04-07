@@ -21,6 +21,7 @@ export const App: React.FC = () => {
     indexed: false,
     commitCount: 0,
     lastIndexedAt: null,
+    lastIndexedHash: null,
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const streamingRef = useRef<Map<string, string>>(new Map());
@@ -109,6 +110,17 @@ export const App: React.FC = () => {
     getVSCodeAPI().postMessage({ command: 'index' });
   }, []);
 
+  const handleSummarize = useCallback(() => {
+    setIsLoading(true);
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: "What's changed recently?",
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    getVSCodeAPI().postMessage({ command: 'summarize' });
+  }, []);
+
   return (
     <div className="app">
       <StatusBar
@@ -116,6 +128,7 @@ export const App: React.FC = () => {
         isIndexing={isIndexing}
         indexProgress={indexProgress}
         onIndex={handleIndex}
+        onSummarize={handleSummarize}
       />
       <div className="messages">
         {messages.length === 0 && (

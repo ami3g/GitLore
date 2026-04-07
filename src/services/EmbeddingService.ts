@@ -38,16 +38,15 @@ export class EmbeddingService {
     const pipe = await this.init();
     const results: number[][] = [];
 
-    // Process in small batches to avoid OOM on large repos
-    const batchSize = 16;
+    // True batch inference — send 32 strings at once to the model
+    const batchSize = 32;
     for (let i = 0; i < texts.length; i += batchSize) {
       const batch = texts.slice(i, i + batchSize);
       onProgress?.('Generating embeddings', i, texts.length);
 
-      for (const text of batch) {
-        const output = await pipe(text, { pooling: 'mean', normalize: true });
-        results.push(output.tolist()[0]);
-      }
+      const output = await pipe(batch, { pooling: 'mean', normalize: true });
+      const vectors = output.tolist();
+      results.push(...vectors);
     }
 
     onProgress?.('Generating embeddings', texts.length, texts.length);

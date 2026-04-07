@@ -52,6 +52,10 @@
       {
         "command": "gitlore.setApiKey",
         "title": "Git-Lore: Set OpenAI API Key"
+      },
+      {
+        "command": "gitlore.summarizeRecent",
+        "title": "Git-Lore: What's Changed?"
       }
     ],
     "configuration": {

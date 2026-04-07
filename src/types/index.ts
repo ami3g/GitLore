@@ -49,6 +49,7 @@ export interface ChatMessage {
 export type WebviewToExtensionMessage =
   | { command: 'query'; payload: { text: string } }
   | { command: 'index' }
+  | { command: 'summarize' }
   | { command: 'getStatus' }
   | { command: 'setApiKey'; payload: { key: string } };
 

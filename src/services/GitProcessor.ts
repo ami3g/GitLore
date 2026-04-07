@@ -196,6 +196,19 @@ export class GitProcessor {
     }
   }
 
+  /**
+   * Check if a commit hash exists in the current history.
+   * Returns false after a rebase/reset that removed it.
+   */
+  async hashExists(hash: string): Promise<boolean> {
+    try {
+      await this.git.catFile(['-t', hash]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async getDiffForCommit(hash: string): Promise<string> {
     const result = await this.git.show([
       hash,

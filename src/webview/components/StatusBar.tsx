@@ -6,6 +6,7 @@ interface StatusBarProps {
   isIndexing: boolean;
   indexProgress: string;
   onIndex: () => void;
+  onSummarize: () => void;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
@@ -13,6 +14,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   isIndexing,
   indexProgress,
   onIndex,
+  onSummarize,
 }) => {
   return (
     <div className="status-bar">
@@ -22,19 +24,29 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           <span className="status-bar__text">{indexProgress}</span>
         ) : status.indexed ? (
           <span className="status-bar__text">
-            {status.commitCount} commits indexed
+            {status.commitCount} chunks indexed
           </span>
         ) : (
           <span className="status-bar__text">Not indexed</span>
         )}
       </div>
-      <button
-        className="status-bar__button"
-        onClick={onIndex}
-        disabled={isIndexing}
-      >
-        {isIndexing ? 'Indexing...' : status.indexed ? 'Re-index' : 'Index Repo'}
-      </button>
+      <div className="status-bar__actions">
+        {status.indexed && !isIndexing && (
+          <button
+            className="status-bar__button status-bar__button--secondary"
+            onClick={onSummarize}
+          >
+            What's Changed?
+          </button>
+        )}
+        <button
+          className="status-bar__button"
+          onClick={onIndex}
+          disabled={isIndexing}
+        >
+          {isIndexing ? 'Indexing...' : status.indexed ? 'Re-index' : 'Index Repo'}
+        </button>
+      </div>
     </div>
   );
 };

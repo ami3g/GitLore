@@ -19,7 +19,12 @@ STRICT FORMATTING RULES:
 5. Group multiple commits from the same day under one date header.
 6. Identify authors clearly.
 
+CONVERSATION CONTEXT: Use the provided conversation history for continuity, but always prioritize the "Retrieved Snippets" for technical accuracy on the current question. If the snippets contradict previous discussion, trust the snippets.
+
 TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
+
+// Rough character budget — ~4 chars per token, leave room for the response
+const MAX_PROMPT_CHARS = 24000; // ~6K tokens, safe for gpt-4o-mini (128K) and smaller Ollama models (8K)
 
 export class RAGEngine {
   private context: vscode.ExtensionContext;
@@ -50,56 +55,85 @@ export class RAGEngine {
     // Check if we can do an incremental index
     const meta = store.loadMeta();
     const isAlreadyIndexed = await store.isIndexed();
+    let doFullIndex = true;
 
     if (meta?.lastIndexedHash && isAlreadyIndexed) {
-      // ─── Incremental: only new commits ───
-      onProgress?.('Checking for new commits', 0, 0);
-      const newChunks = await gitProcessor.extractNewCommits(
-        meta.lastIndexedHash,
-        commitDepth,
-        onProgress
-      );
+      // Safety check: verify the hash still exists (survives rebase/reset)
+      const hashValid = await gitProcessor.hashExists(meta.lastIndexedHash);
 
-      if (newChunks.length === 0) {
-        onProgress?.('Already up to date', 1, 1);
-        return;
+      if (!hashValid) {
+        // History was rewritten — force a full rebuild
+        onProgress?.('History rewritten (rebase/reset detected) — rebuilding', 0, 0);
+        await store.clear();
+        // doFullIndex stays true
+      } else {
+        // ─── Incremental: only new commits ───
+        doFullIndex = false;
+        onProgress?.('Checking for new commits', 0, 0);
+        const newChunks = await gitProcessor.extractNewCommits(
+          meta.lastIndexedHash,
+          commitDepth,
+          onProgress
+        );
+
+        if (newChunks.length === 0) {
+          onProgress?.('Already up to date', 1, 1);
+          return;
+        }
+
+        // Embed only the new chunks
+        const texts = newChunks.map((c) => gitProcessor.toEmbeddingText(c));
+        const embeddings = await embedding.embedBatch(texts, onProgress);
+
+        // Append to existing table
+        onProgress?.('Appending to vector database', 0, 1);
+        await store.addRecords(newChunks, embeddings);
+
+        // Update metadata with latest hash
+        const latestHash = await gitProcessor.getLatestHash();
+        if (latestHash) {
+          store.saveMeta(latestHash);
+        }
+        onProgress?.(`Incremental index complete — ${newChunks.length} new chunks`, 1, 1);
       }
+    }
 
-      // Embed only the new chunks
-      const texts = newChunks.map((c) => gitProcessor.toEmbeddingText(c));
-      const embeddings = await embedding.embedBatch(texts, onProgress);
-
-      // Append to existing table
-      onProgress?.('Appending to vector database', 0, 1);
-      await store.addRecords(newChunks, embeddings);
-
-      // Update metadata with latest hash
-      const latestHash = await gitProcessor.getLatestHash();
-      if (latestHash) {
-        store.saveMeta(latestHash);
-      }
-      onProgress?.(`Incremental index complete — ${newChunks.length} new chunks`, 1, 1);
-    } else {
-      // ─── Full index ───
+    if (doFullIndex) {
+      // ─── Full index (streamed in windows to limit memory) ───
       onProgress?.('Initializing Git processor', 0, commitDepth);
-      const chunks = await gitProcessor.extractAndChunk(commitDepth, onProgress);
+      const allChunks = await gitProcessor.extractAndChunk(commitDepth, onProgress);
 
-      if (chunks.length === 0) {
+      if (allChunks.length === 0) {
         throw new Error('No commits found in this repository.');
       }
 
-      const texts = chunks.map((c) => gitProcessor.toEmbeddingText(c));
-      const embeddings = await embedding.embedBatch(texts, onProgress);
+      const WINDOW = 100;
+      let totalWritten = 0;
 
-      onProgress?.('Storing in vector database', 0, 1);
-      await store.createTable(chunks, embeddings);
+      for (let i = 0; i < allChunks.length; i += WINDOW) {
+        const window = allChunks.slice(i, i + WINDOW);
+        const texts = window.map((c) => gitProcessor.toEmbeddingText(c));
+        const embeddings = await embedding.embedBatch(texts, (phase, cur, tot) => {
+          onProgress?.(phase, i + cur, allChunks.length);
+        });
+
+        if (i === 0) {
+          // First window — create the table
+          onProgress?.('Storing in vector database', 0, allChunks.length);
+          await store.createTable(window, embeddings);
+        } else {
+          // Subsequent windows — append
+          await store.addRecords(window, embeddings);
+        }
+        totalWritten += window.length;
+      }
 
       // Save metadata for future incremental runs
       const latestHash = await gitProcessor.getLatestHash();
       if (latestHash) {
         store.saveMeta(latestHash);
       }
-      onProgress?.('Indexing complete', 1, 1);
+      onProgress?.('Indexing complete', totalWritten, totalWritten);
     }
   }
 
@@ -107,7 +141,8 @@ export class RAGEngine {
 
   async query(
     question: string,
-    onChunk?: StreamCallback
+    onChunk?: StreamCallback,
+    conversationHistory?: LLMMessage[]
   ): Promise<string> {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
@@ -132,7 +167,7 @@ export class RAGEngine {
     const results = await store.search(queryVector, topK);
 
     // Step 3: Build context-aware prompt
-    const messages = this.buildPrompt(question, results);
+    const messages = this.buildPrompt(question, results, conversationHistory);
 
     // Step 4: Send to LLM
     const provider = this.getLLMProvider();
@@ -162,6 +197,71 @@ export class RAGEngine {
     this.vectorStore = null;
   }
 
+  /**
+   * Summarize all commits between lastIndexedHash and HEAD.
+   * "What's changed since I last looked?"
+   */
+  async summarizeRecent(onChunk?: StreamCallback): Promise<string> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      throw new Error('No workspace folder open.');
+    }
+
+    const repoPath = workspaceFolder.uri.fsPath;
+    const storePath = this.getStorePath(repoPath);
+    const store = this.getVectorStore(storePath);
+    const meta = store.loadMeta();
+
+    const gitProcessor = new GitProcessor(repoPath);
+    const latestHash = await gitProcessor.getLatestHash();
+
+    if (!latestHash) {
+      throw new Error('No commits found in this repository.');
+    }
+
+    let chunks;
+    if (meta?.lastIndexedHash && meta.lastIndexedHash !== latestHash) {
+      // Summarize commits since last index
+      chunks = await gitProcessor.extractNewCommits(meta.lastIndexedHash, 100);
+    } else {
+      // No previous index or already up to date — summarize last 20 commits
+      chunks = await gitProcessor.extractAndChunk(20);
+    }
+
+    if (chunks.length === 0) {
+      throw new Error('No new commits to summarize.');
+    }
+
+    // Build a condensed summary of all chunks (no embedding needed — direct to LLM)
+    const commitSummaries = chunks
+      .map((c) => {
+        const lines = [
+          `Commit: ${c.hash.substring(0, 8)} | Author: ${c.author} | Date: ${c.date}`,
+          `Message: ${c.message}`,
+        ];
+        if (c.filePath) lines.push(`File: ${c.filePath}`);
+        if (c.condensedDiff) lines.push(`Diff:\n${c.condensedDiff}`);
+        return lines.join('\n');
+      })
+      .join('\n\n');
+
+    // Trim if too long for the LLM
+    const trimmed = commitSummaries.length > MAX_PROMPT_CHARS
+      ? commitSummaries.slice(0, MAX_PROMPT_CHARS) + '\n\n... [additional commits truncated]'
+      : commitSummaries;
+
+    const messages: LLMMessage[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: `Summarize the following recent commits for a standup update. Focus on what changed, why, and any patterns or themes across the changes:\n\n${trimmed}`,
+      },
+    ];
+
+    const provider = this.getLLMProvider();
+    return provider.sendMessage(messages, onChunk);
+  }
+
   onConfigChanged(): void {
     // Reset LLM provider so it picks up new settings
     this.llmProvider = null;
@@ -169,7 +269,7 @@ export class RAGEngine {
 
   // ─── Private Helpers ───
 
-  private buildPrompt(question: string, results: SearchResult[]): LLMMessage[] {
+  private buildPrompt(question: string, results: SearchResult[], conversationHistory?: LLMMessage[]): LLMMessage[] {
     const contextSnippets = results
       .map((r, i) => {
         const c = r.chunk;
@@ -192,13 +292,32 @@ export class RAGEngine {
       })
       .join('\n\n');
 
-    return [
+    const userMessage = `Here are the most relevant commits from the repository history:\n\n${contextSnippets}\n\n---\n\nQuestion: ${question}`;
+
+    const messages: LLMMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: `Here are the most relevant commits from the repository history:\n\n${contextSnippets}\n\n---\n\nQuestion: ${question}`,
-      },
     ];
+
+    // Include conversation history, trimmed to fit token budget
+    if (conversationHistory && conversationHistory.length > 0) {
+      let recent = conversationHistory.slice(-10); // 5 exchanges = 10 messages
+
+      // Calculate fixed cost: system prompt + current user message with snippets
+      const fixedCost = SYSTEM_PROMPT.length + userMessage.length;
+      let historyCost = recent.reduce((sum, m) => sum + m.content.length, 0);
+
+      // Drop oldest messages until we fit the budget
+      while (recent.length > 0 && fixedCost + historyCost > MAX_PROMPT_CHARS) {
+        historyCost -= recent[0].content.length;
+        recent = recent.slice(1);
+      }
+
+      messages.push(...recent);
+    }
+
+    messages.push({ role: 'user', content: userMessage });
+
+    return messages;
   }
 
   private getLLMProvider(): LLMProvider {

@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { RAGEngine } from '../services/RAGEngine';
-import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types';
+import type { WebviewToExtensionMessage, ExtensionToWebviewMessage, LLMMessage } from '../types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'gitlore.chatView';
 
   private view?: vscode.WebviewView;
   private ragEngine: RAGEngine;
+  private conversationHistory: LLMMessage[] = [];
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.ragEngine = new RAGEngine(context);
@@ -94,6 +95,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.ragEngine.onConfigChanged();
   }
 
+  public async handleSummarizeRecent(): Promise<void> {
+    const messageId = crypto.randomUUID();
+
+    try {
+      let fullResponse = '';
+      await this.ragEngine.summarizeRecent((chunk: string) => {
+        fullResponse += chunk;
+        this.postMessage({
+          command: 'streamChunk',
+          payload: { id: messageId, content: chunk },
+        });
+      });
+
+      // Add to conversation history for follow-ups
+      this.conversationHistory.push(
+        { role: 'user', content: "What's changed recently?" },
+        { role: 'assistant', content: fullResponse }
+      );
+      if (this.conversationHistory.length > 10) {
+        this.conversationHistory = this.conversationHistory.slice(-10);
+      }
+
+      this.postMessage({
+        command: 'streamEnd',
+        payload: { id: messageId },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.postMessage({ command: 'error', payload: { message: msg } });
+    }
+  }
+
   // ─── Message handling ───
 
   private async handleMessage(message: WebviewToExtensionMessage): Promise<void> {
@@ -103,6 +136,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'index':
         await this.handleIndexRepository();
+        break;
+      case 'summarize':
+        await this.handleSummarizeRecent();
         break;
       case 'getStatus':
         await this.sendStatus();
@@ -116,13 +152,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleQuery(text: string): Promise<void> {
     const messageId = crypto.randomUUID();
 
+    // Track user message
+    this.conversationHistory.push({ role: 'user', content: text });
+
     try {
+      let fullResponse = '';
       await this.ragEngine.query(text, (chunk: string) => {
+        fullResponse += chunk;
         this.postMessage({
           command: 'streamChunk',
           payload: { id: messageId, content: chunk },
         });
-      });
+      }, this.conversationHistory.slice(0, -1)); // pass history without the current question
+
+      // Track assistant response
+      this.conversationHistory.push({ role: 'assistant', content: fullResponse });
+
+      // Keep only last 10 messages (5 exchanges)
+      if (this.conversationHistory.length > 10) {
+        this.conversationHistory = this.conversationHistory.slice(-10);
+      }
 
       this.postMessage({
         command: 'streamEnd',
@@ -141,7 +190,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch {
       this.postMessage({
         command: 'status',
-        payload: { indexed: false, commitCount: 0, lastIndexedAt: null },
+        payload: { indexed: false, commitCount: 0, lastIndexedAt: null, lastIndexedHash: null },
       });
     }
   }
