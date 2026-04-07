@@ -11,6 +11,12 @@ Git-Lore indexes your local commit history into a local vector database, then le
 - **Smart truncation** — Code files (`.ts`, `.py`, `.go`) get 3× more diff budget than config/docs files
 - **Hybrid LLM support** — Use **Ollama** (local, private) or **OpenAI** (cloud)
 - **Incremental indexing** — After the first full index, subsequent runs only process new commits
+- **Rebase-safe** — Detects history rewrites (rebase/reset) and auto-rebuilds the index
+- **Conversation memory** — Remembers the last 5 exchanges so you can ask follow-up questions
+- **Token budget management** — Automatically trims conversation history to fit LLM context limits
+- **"What's Changed?" standup summary** — One-click summary of all commits since your last index
+- **Batch embedding** — Sends 32 texts at once for faster indexing
+- **Streaming DB writes** — Writes in 100-chunk windows to limit memory on large repos
 - **Sidebar chat UI** — Ask questions from a dedicated panel in the activity bar
 - **Streaming responses** — See answers as they're generated
 - **Privacy by design** — Only the top 5 most relevant commit snippets are sent to the LLM
@@ -118,6 +124,7 @@ Add `.vscode/git-lore/` to your `.gitignore`.
 | `Git-Lore: Index Repository` | Extract, embed, and index commit history |
 | `Git-Lore: Clear Index` | Delete the local vector database |
 | `Git-Lore: Set OpenAI API Key` | Securely store your OpenAI API key |
+| `Git-Lore: What's Changed?` | Summarize commits since the last index (standup-ready) |
 
 ## Tech Stack
 
