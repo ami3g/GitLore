@@ -10,6 +10,7 @@ Git-Lore indexes your local commit history into a local vector database, then le
 - **File-level chunking** — Each file changed in a commit gets its own embedding, so queries match the exact file change — not a whole commit blob
 - **Smart truncation** — Code files (`.ts`, `.py`, `.go`) get 3× more diff budget than config/docs files
 - **Hybrid LLM support** — Use **Ollama** (local, private) or **OpenAI** (cloud)
+- **Incremental indexing** — After the first full index, subsequent runs only process new commits
 - **Sidebar chat UI** — Ask questions from a dedicated panel in the activity bar
 - **Streaming responses** — See answers as they're generated
 - **Privacy by design** — Only the top 5 most relevant commit snippets are sent to the LLM
@@ -82,8 +83,10 @@ Press **F5** in VS Code to launch the Extension Development Host.
 │       │                                             │
 │       ├── VectorStore       (LanceDB)               │
 │       │     └── .vscode/git-lore/db/               │
+│       │     └── incremental append + metadata       │
 │       │                                             │
 │       ├── RAGEngine         (orchestrator)          │
+│       │     └── full or incremental index           │
 │       │     └── query → search → prompt → LLM      │
 │       │                                             │
 │       └── LLMProvider (interface)                   │
@@ -101,8 +104,9 @@ All data is stored locally in `.vscode/git-lore/` within your workspace:
 
 ```
 .vscode/git-lore/
-├── db/         # LanceDB vector database
-└── models/     # Cached embedding model (all-MiniLM-L6-v2)
+├── db/              # LanceDB vector database
+├── models/          # Cached embedding model (all-MiniLM-L6-v2)
+└── index-meta.json  # Tracks last indexed commit hash for incremental runs
 ```
 
 Add `.vscode/git-lore/` to your `.gitignore`.

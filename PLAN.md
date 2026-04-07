@@ -1,6 +1,6 @@
 # PLAN.md — Git-Lore Source of Truth
 
-> Last updated: 2026-04-06
+> Last updated: 2026-04-07
 
 ## Feature Status
 
@@ -24,8 +24,9 @@
 
 ### Phase 3: Embedding & Vector Storage
 - [x] `EmbeddingService` — `@huggingface/transformers` pipeline, lazy init, 384-dim vectors
-- [x] `VectorStore` — LanceDB wrapper (connect, createTable, search, clear, getStatus)
+- [x] `VectorStore` — LanceDB wrapper (connect, createTable, addRecords, search, clear, getStatus)
 - [x] Batch embedding with progress
+- [x] Metadata persistence (`index-meta.json`) tracking last indexed commit hash
 
 ### Phase 4: LLM Provider Layer
 - [x] `LLMProvider` interface (sendMessage with streaming, testConnection)
@@ -33,7 +34,8 @@
 - [x] `OllamaProvider` — fetch + NDJSON streaming, configurable endpoint
 
 ### Phase 5: RAG Engine
-- [x] `RAGEngine` orchestrator — indexRepository (extract→embed→store), query (embed→search→prompt→stream)
+- [x] `RAGEngine` orchestrator — indexRepository (full or incremental), query (embed→search→prompt→stream)
+- [x] Incremental indexing: detects existing index + metadata, only processes commits since `lastIndexedHash`
 - [x] File-level context-aware prompt construction with system message + retrieved snippets
 - [x] Custom system prompt: professional, developer-centric tone with structured markdown output
 - [x] Provider selection from VS Code settings
@@ -51,19 +53,22 @@
 - [ ] End-to-end testing with real repository
 - [ ] Markdown rendering in chat messages
 - [ ] Conversation history persistence (webview state)
-- [ ] Incremental indexing (only new commits since last index)
 
 ## Known Limitations (v0.1)
 
-- **No incremental indexing** — full re-index each time
-- **Single branch** — indexes current branch only (--all flag in git log)
-- **No file navigation** — can't click commit hashes to open diffs
+- **Single branch** — indexes all branches via `--all` flag, but no branch filtering
+- **No file navigation** — can't click commit hashes to open diffs in VS Code
 - **No multi-repo** — first workspace folder only
 - **No conversation persistence** — chat clears on panel close
+- **No markdown rendering** — LLM responses display as plain text
 - **Embedding model download** — first index requires ~80MB model download
+- **Memory during indexing** — all chunks held in memory before DB write; very large repos (50K+ chunks) may use 1-2GB RAM
+- **Sequential embedding** — ~50ms per chunk; large repos scale linearly
 
 ## Future Ideas (v0.2+)
 
+- [ ] Batch parallel embedding (32-64 at a time for speed)
+- [ ] Streaming writes to DB during indexing (lower memory)
 - [ ] Branch-aware indexing with branch filter
 - [ ] Click commit hash → open diff in VS Code
 - [ ] Multi-root workspace support
@@ -80,3 +85,4 @@
 - **Embeddings are local**: transformers.js runs all-MiniLM-L6-v2 in Node.js, no external API needed
 - **Privacy**: vector search is 100% local. Only the top-K commit snippets + user question go to the LLM.
 - **API keys**: stored in VS Code's SecretStorage (OS keychain), never in settings JSON
+- **Incremental indexing**: `index-meta.json` stores `lastIndexedHash`. On re-index, `git log lastHash..HEAD` fetches only new commits → embed → append to LanceDB table. Full re-index on first run or after `Clear Index`.
