@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../../types/index';
 
 interface VSCodeAPI {
@@ -20,7 +21,6 @@ export function getVSCodeAPI(): VSCodeAPI {
 export function useVSCodeListener(
   handler: (message: ExtensionToWebviewMessage) => void
 ) {
-  const { useEffect } = require('react');
   useEffect(() => {
     const listener = (event: MessageEvent<ExtensionToWebviewMessage>) => {
       handler(event.data);

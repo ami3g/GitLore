@@ -7,6 +7,8 @@ Git-Lore indexes your local commit history into a local vector database, then le
 ## Features
 
 - **Local-first RAG pipeline** — Commits are extracted, embedded, and stored entirely on your machine
+- **File-level chunking** — Each file changed in a commit gets its own embedding, so queries match the exact file change — not a whole commit blob
+- **Smart truncation** — Code files (`.ts`, `.py`, `.go`) get 3× more diff budget than config/docs files
 - **Hybrid LLM support** — Use **Ollama** (local, private) or **OpenAI** (cloud)
 - **Sidebar chat UI** — Ask questions from a dedicated panel in the activity bar
 - **Streaming responses** — See answers as they're generated
@@ -72,7 +74,8 @@ Press **F5** in VS Code to launch the Extension Development Host.
 │  extension.ts → ChatViewProvider (sidebar)          │
 │       │                                             │
 │       ├── GitProcessor      (simple-git)            │
-│       │     └── extract commits → chunk → embed     │
+│       │     └── extract commits → file-level chunks  │
+│       │     └── smart truncation by file type        │
 │       │                                             │
 │       ├── EmbeddingService  (transformers.js)       │
 │       │     └── all-MiniLM-L6-v2, 384-dim vectors  │

@@ -17,8 +17,9 @@
 - [x] CSS with VS Code theme variable integration
 
 ### Phase 2: Git Data Extraction
-- [x] Shared types (`CommitChunk`, `SearchResult`, `LLMMessage`, etc.)
-- [x] `GitProcessor` — extract commits via `simple-git`, chunk with condensed diffs (~2000 char limit)
+- [x] Shared types (`CommitChunk` with `filePath` field for file-level granularity)
+- [x] `GitProcessor` — extract commits via `simple-git`, **file-level chunking** (one embedding per file changed)
+- [x] Smart truncation: code files (`.ts`, `.py`, `.go`) get 3,000 chars; medium (`.sql`, `.sh`) get 1,500; config/docs get 600
 - [x] Progress reporting callback
 
 ### Phase 3: Embedding & Vector Storage
@@ -33,7 +34,8 @@
 
 ### Phase 5: RAG Engine
 - [x] `RAGEngine` orchestrator — indexRepository (extract→embed→store), query (embed→search→prompt→stream)
-- [x] Context-aware prompt construction with system message + retrieved snippets
+- [x] File-level context-aware prompt construction with system message + retrieved snippets
+- [x] Custom system prompt: professional, developer-centric tone with structured markdown output
 - [x] Provider selection from VS Code settings
 
 ### Phase 6: Wire UI ↔ Backend
@@ -49,6 +51,7 @@
 - [ ] End-to-end testing with real repository
 - [ ] Markdown rendering in chat messages
 - [ ] Conversation history persistence (webview state)
+- [ ] Incremental indexing (only new commits since last index)
 
 ## Known Limitations (v0.1)
 
@@ -61,7 +64,6 @@
 
 ## Future Ideas (v0.2+)
 
-- [ ] Incremental indexing (only new commits since last index)
 - [ ] Branch-aware indexing with branch filter
 - [ ] Click commit hash → open diff in VS Code
 - [ ] Multi-root workspace support

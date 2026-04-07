@@ -5,8 +5,9 @@ export interface CommitChunk {
   author: string;
   date: string;
   message: string;
-  condensedDiff: string;
-  filesChanged: string[];
+  filePath: string;        // the specific file this chunk describes
+  condensedDiff: string;   // diff for just this file
+  filesChanged: string[];  // all files in the parent commit (context)
 }
 
 export interface IndexStatus {

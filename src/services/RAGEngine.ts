@@ -9,14 +9,17 @@ import { OllamaProvider } from './llm/OllamaProvider';
 import type { LLMProvider, StreamCallback } from './llm/LLMProvider';
 import type { IndexStatus, LLMMessage, SearchResult } from '../types';
 
-const SYSTEM_PROMPT = `You are Git-Lore, a knowledgeable Git historian and code archaeologist. Your role is to help developers understand WHY code changed by analyzing commit history.
+const SYSTEM_PROMPT = `You are GitLore, a specialized Repository Historian. Your goal is to provide technical, high-density insights based on indexed git commits.
 
-When answering:
-- Reference specific commit hashes (shortened to 8 chars) when citing evidence.
-- Mention the author and date when relevant.
-- Explain the reasoning behind changes based on commit messages and diffs.
-- If the retrieved commits don't fully answer the question, say so honestly.
-- Keep answers focused and concise.`;
+STRICT FORMATTING RULES:
+1. Use ### for Date headers (e.g., ### March 10, 2026).
+2. Use **Bold Title** for the main change in a commit.
+3. Include the short hash as a clickable link: [hash](https://github.com).
+4. Use Bullet points for technical "Why" and "How" details.
+5. Group multiple commits from the same day under one date header.
+6. Identify authors clearly.
+
+TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
 
 export class RAGEngine {
   private context: vscode.ExtensionContext;
@@ -131,16 +134,22 @@ export class RAGEngine {
     const contextSnippets = results
       .map((r, i) => {
         const c = r.chunk;
-        return [
+        const lines = [
           `--- Snippet ${i + 1} (relevance score: ${r.score.toFixed(4)}) ---`,
           `Commit: ${c.hash.substring(0, 8)}`,
           `Author: ${c.author} | Date: ${c.date}`,
           `Message: ${c.message}`,
-          c.filesChanged.length > 0 ? `Files: ${c.filesChanged.join(', ')}` : '',
-          c.condensedDiff ? `Diff:\n${c.condensedDiff}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n');
+        ];
+        if (c.filePath) {
+          lines.push(`File: ${c.filePath}`);
+        }
+        if (c.filesChanged.length > 0) {
+          lines.push(`Other files in commit: ${c.filesChanged.join(', ')}`);
+        }
+        if (c.condensedDiff) {
+          lines.push(`Diff:\n${c.condensedDiff}`);
+        }
+        return lines.join('\n');
       })
       .join('\n\n');
 

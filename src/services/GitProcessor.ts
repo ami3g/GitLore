@@ -1,9 +1,39 @@
 import simpleGit, { type SimpleGit, type DefaultLogFields, type ListLogLine } from 'simple-git';
 import type { CommitChunk } from '../types';
 
-const MAX_DIFF_LENGTH = 2000;
+// ─── Smart Truncation Budget ───
+// Code files get the lion's share; config/docs get less.
+const BUDGET_HIGH = 3000;   // .ts, .py, .go, .rs, .java, .c, .cpp, etc.
+const BUDGET_MEDIUM = 1500; // .sql, .graphql, .proto, .sh
+const BUDGET_LOW = 600;     // .json, .yaml, .md, .lock, .css, .html, etc.
+
+const HIGH_PRIORITY_EXT = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp',
+  '.cs', '.rb', '.swift', '.kt', '.kts', '.scala', '.ex', '.exs',
+  '.vue', '.svelte',
+]);
+
+const MEDIUM_PRIORITY_EXT = new Set([
+  '.sql', '.graphql', '.gql', '.proto', '.sh', '.bash', '.zsh',
+  '.ps1', '.bat', '.cmd', '.lua', '.r', '.m',
+]);
+
+// Everything else falls to LOW.
 
 export type ProgressCallback = (phase: string, current: number, total: number) => void;
+
+function extOf(filePath: string): string {
+  const dot = filePath.lastIndexOf('.');
+  return dot === -1 ? '' : filePath.slice(dot).toLowerCase();
+}
+
+function budgetFor(filePath: string): number {
+  const ext = extOf(filePath);
+  if (HIGH_PRIORITY_EXT.has(ext)) return BUDGET_HIGH;
+  if (MEDIUM_PRIORITY_EXT.has(ext)) return BUDGET_MEDIUM;
+  return BUDGET_LOW;
+}
 
 export class GitProcessor {
   private git: SimpleGit;
@@ -12,6 +42,10 @@ export class GitProcessor {
     this.git = simpleGit(repoPath, { maxConcurrentProcesses: 4 });
   }
 
+  /**
+   * Extract commits and produce **one chunk per file** changed in each commit.
+   * This gives the vector DB fine-grained, file-level embeddings.
+   */
   async extractAndChunk(
     maxCount: number,
     onProgress?: ProgressCallback
@@ -29,23 +63,45 @@ export class GitProcessor {
 
       try {
         const diff = await this.getDiffForCommit(commit.hash);
-        const { condensed, filesChanged } = this.condenseDiff(diff);
+        const fileDiffs = this.splitDiffByFile(diff);
+        const allFiles = fileDiffs.map((fd) => fd.filePath);
 
-        chunks.push({
-          hash: commit.hash,
-          author: commit.author_name,
-          date: commit.date,
-          message: commit.message,
-          condensedDiff: condensed,
-          filesChanged,
-        });
+        if (fileDiffs.length === 0) {
+          // Merge commit or empty diff — still index the commit message
+          chunks.push({
+            hash: commit.hash,
+            author: commit.author_name,
+            date: commit.date,
+            message: commit.message,
+            filePath: '',
+            condensedDiff: '',
+            filesChanged: [],
+          });
+          continue;
+        }
+
+        for (const fd of fileDiffs) {
+          const budget = budgetFor(fd.filePath);
+          const condensed = this.condenseFileDiff(fd.rawDiff, budget);
+
+          chunks.push({
+            hash: commit.hash,
+            author: commit.author_name,
+            date: commit.date,
+            message: commit.message,
+            filePath: fd.filePath,
+            condensedDiff: condensed,
+            filesChanged: allFiles,
+          });
+        }
       } catch {
-        // Skip commits that fail (e.g., initial commit with no parent)
+        // Initial commit or error — index just the message
         chunks.push({
           hash: commit.hash,
           author: commit.author_name,
           date: commit.date,
           message: commit.message,
+          filePath: '',
           condensedDiff: '',
           filesChanged: [],
         });
@@ -56,7 +112,6 @@ export class GitProcessor {
   }
 
   private async getDiffForCommit(hash: string): Promise<string> {
-    // git show produces the patch for a single commit
     const result = await this.git.show([
       hash,
       '--stat',
@@ -67,26 +122,34 @@ export class GitProcessor {
     return result;
   }
 
-  private condenseDiff(diff: string): { condensed: string; filesChanged: string[] } {
-    if (!diff) {
-      return { condensed: '', filesChanged: [] };
+  // ─── Split a full commit diff into per-file segments ───
+
+  private splitDiffByFile(diff: string): { filePath: string; rawDiff: string }[] {
+    if (!diff) return [];
+
+    const segments: { filePath: string; rawDiff: string }[] = [];
+    // Split on "diff --git" boundaries, keeping the delimiter
+    const parts = diff.split(/(?=^diff --git )/m);
+
+    for (const part of parts) {
+      if (!part.startsWith('diff --git')) continue;
+      const match = part.match(/^diff --git a\/.+ b\/(.+)$/m);
+      if (match) {
+        segments.push({ filePath: match[1], rawDiff: part });
+      }
     }
 
-    const filesChanged: string[] = [];
-    const lines = diff.split('\n');
-    const condensedParts: string[] = [];
-    let currentLength = 0;
+    return segments;
+  }
+
+  // ─── Condense a single file's diff within the given budget ───
+
+  private condenseFileDiff(rawDiff: string, budget: number): string {
+    const lines = rawDiff.split('\n');
+    const kept: string[] = [];
+    let length = 0;
 
     for (const line of lines) {
-      // Extract file names from diff headers
-      if (line.startsWith('diff --git')) {
-        const match = line.match(/b\/(.+)$/);
-        if (match) {
-          filesChanged.push(match[1]);
-        }
-      }
-
-      // Keep: file headers, hunk headers, and changed lines (prioritize context)
       if (
         line.startsWith('diff --git') ||
         line.startsWith('---') ||
@@ -95,20 +158,19 @@ export class GitProcessor {
         line.startsWith('+') ||
         line.startsWith('-')
       ) {
-        if (currentLength + line.length + 1 > MAX_DIFF_LENGTH) {
-          condensedParts.push('... [diff truncated]');
+        if (length + line.length + 1 > budget) {
+          kept.push('... [diff truncated]');
           break;
         }
-        condensedParts.push(line);
-        currentLength += line.length + 1;
+        kept.push(line);
+        length += line.length + 1;
       }
     }
 
-    return {
-      condensed: condensedParts.join('\n'),
-      filesChanged: [...new Set(filesChanged)],
-    };
+    return kept.join('\n');
   }
+
+  // ─── Embedding Text ───
 
   toEmbeddingText(chunk: CommitChunk): string {
     const parts = [
@@ -117,8 +179,11 @@ export class GitProcessor {
       `Date: ${chunk.date}`,
       `Message: ${chunk.message}`,
     ];
+    if (chunk.filePath) {
+      parts.push(`File: ${chunk.filePath}`);
+    }
     if (chunk.filesChanged.length > 0) {
-      parts.push(`Files: ${chunk.filesChanged.join(', ')}`);
+      parts.push(`Other files in commit: ${chunk.filesChanged.join(', ')}`);
     }
     if (chunk.condensedDiff) {
       parts.push(`Diff:\n${chunk.condensedDiff}`);

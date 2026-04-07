@@ -170,6 +170,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     content="default-src 'none';
       style-src ${webview.cspSource} 'unsafe-inline';
       script-src 'nonce-${nonce}';
+      connect-src https://api.openai.com http://localhost:11434;
       font-src ${webview.cspSource};
       img-src ${webview.cspSource} https:;">
   <link rel="stylesheet" href="${styleUri}">

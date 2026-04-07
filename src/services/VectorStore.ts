@@ -10,6 +10,7 @@ type CommitRecord = Record<string, unknown> & {
   author: string;
   date: string;
   message: string;
+  filePath: string;
   condensedDiff: string;
   filesChanged: string;
 };
@@ -42,6 +43,7 @@ export class VectorStore {
       author: chunk.author,
       date: chunk.date,
       message: chunk.message,
+      filePath: chunk.filePath,
       condensedDiff: chunk.condensedDiff,
       filesChanged: chunk.filesChanged.join(','),
     }));
@@ -73,6 +75,7 @@ export class VectorStore {
         author: row['author'] as string,
         date: row['date'] as string,
         message: row['message'] as string,
+        filePath: row['filePath'] as string,
         condensedDiff: row['condensedDiff'] as string,
         filesChanged: (row['filesChanged'] as string).split(',').filter(Boolean),
       },

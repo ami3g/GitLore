@@ -7,12 +7,20 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, '../../dist/webview'),
     emptyOutDir: true,
+    lib: {
+      entry: resolve(__dirname, 'index.tsx'),
+      name: 'GitLoreWebview',
+      formats: ['iife'],
+      fileName: () => 'app.js',
+    },
+    cssCodeSplit: false,
     rollupOptions: {
-      input: resolve(__dirname, 'index.html'),
       output: {
-        entryFileNames: 'app.js',
         assetFileNames: 'app.[ext]',
       },
     },
+  },
+  define: {
+    'process.env.NODE_ENV': '"production"',
   },
 });
