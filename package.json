@@ -56,8 +56,20 @@
       {
         "command": "gitlore.summarizeRecent",
         "title": "Git-Lore: What's Changed?"
+      },
+      {
+        "command": "gitlore.explainLine",
+        "title": "Git-Lore: Explain This Change"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "gitlore.explainLine",
+          "group": "navigation@99"
+        }
+      ]
+    },
     "configuration": {
       "title": "Git-Lore",
       "properties": {

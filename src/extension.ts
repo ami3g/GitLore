@@ -48,6 +48,19 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gitlore.explainLine', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showErrorMessage('Git-Lore: No active editor.');
+        return;
+      }
+      const line = editor.selection.active.line + 1; // 1-based
+      const filePath = vscode.workspace.asRelativePath(editor.document.uri);
+      await chatViewProvider.handleExplainLine(filePath, line);
+    })
+  );
+
   // Listen for config changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {

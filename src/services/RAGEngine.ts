@@ -219,36 +219,58 @@ export class RAGEngine {
       throw new Error('No commits found in this repository.');
     }
 
-    let chunks;
-    if (meta?.lastIndexedHash && meta.lastIndexedHash !== latestHash) {
-      // Summarize commits since last index
-      chunks = await gitProcessor.extractNewCommits(meta.lastIndexedHash, 100);
-    } else {
-      // No previous index or already up to date — summarize last 20 commits
-      chunks = await gitProcessor.extractAndChunk(20);
-    }
+    // Phase 1: Get lightweight TOC (commit messages + file stats)
+    const sinceHash = (meta?.lastIndexedHash && meta.lastIndexedHash !== latestHash)
+      ? meta.lastIndexedHash
+      : null;
+    const maxCommits = sinceHash ? 100 : 20;
 
-    if (chunks.length === 0) {
+    const toc = await gitProcessor.getCommitTOC(sinceHash, maxCommits);
+
+    if (toc.length === 0) {
       throw new Error('No new commits to summarize.');
     }
 
-    // Build a condensed summary of all chunks (no embedding needed — direct to LLM)
-    const commitSummaries = chunks
-      .map((c) => {
+    // Phase 2: Rank commits by complexity (lines changed — ignores noisy merges)
+    const ranked = [...toc].sort((a, b) => b.linesChanged - a.linesChanged);
+
+    // Pull full diffs only for the top 4 most complex commits
+    const DETAIL_LIMIT = 4;
+    const detailedHashes = new Set(ranked.slice(0, DETAIL_LIMIT).map((e) => e.hash));
+    const detailedDiffs: Map<string, string> = new Map();
+
+    for (const hash of detailedHashes) {
+      try {
+        const diff = await gitProcessor.getFullDiffForCommit(hash);
+        // Trim individual diffs to keep total size manageable
+        detailedDiffs.set(hash, diff.length > 4000 ? diff.slice(0, 4000) + '\n... [diff truncated]' : diff);
+      } catch {
+        // skip if diff fails
+      }
+    }
+
+    // Phase 3: Build context — TOC for all, full diffs for complex ones
+    const tocSection = toc
+      .map((entry) => {
         const lines = [
-          `Commit: ${c.hash.substring(0, 8)} | Author: ${c.author} | Date: ${c.date}`,
-          `Message: ${c.message}`,
+          `[COMMIT: ${entry.hash.substring(0, 8)}] ${entry.author} | ${entry.date}`,
+          `[MESSAGE]: ${entry.message}`,
+          `[STAT]: ${entry.stat}`,
         ];
-        if (c.filePath) lines.push(`File: ${c.filePath}`);
-        if (c.condensedDiff) lines.push(`Diff:\n${c.condensedDiff}`);
         return lines.join('\n');
       })
       .join('\n\n');
 
+    const diffSection = Array.from(detailedDiffs.entries())
+      .map(([hash, diff]) => `--- Detailed diff for ${hash.substring(0, 8)} ---\n${diff}`)
+      .join('\n\n');
+
+    const combined = `## Commit Table of Contents\n\n${tocSection}\n\n## Detailed Diffs (most complex changes)\n\n${diffSection}`;
+
     // Trim if too long for the LLM
-    const trimmed = commitSummaries.length > MAX_PROMPT_CHARS
-      ? commitSummaries.slice(0, MAX_PROMPT_CHARS) + '\n\n... [additional commits truncated]'
-      : commitSummaries;
+    const trimmed = combined.length > MAX_PROMPT_CHARS
+      ? combined.slice(0, MAX_PROMPT_CHARS) + '\n\n... [additional content truncated]'
+      : combined;
 
     const messages: LLMMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -274,19 +296,18 @@ export class RAGEngine {
       .map((r, i) => {
         const c = r.chunk;
         const lines = [
-          `--- Snippet ${i + 1} (relevance score: ${r.score.toFixed(4)}) ---`,
-          `Commit: ${c.hash.substring(0, 8)}`,
-          `Author: ${c.author} | Date: ${c.date}`,
-          `Message: ${c.message}`,
+          `--- Retrieved Snippet ${i + 1} (score: ${r.score.toFixed(4)}) ---`,
+          `[COMMIT: ${c.hash.substring(0, 8)}] Author: ${c.author} | Date: ${c.date}`,
+          `[MESSAGE]: ${c.message}`,
         ];
         if (c.filePath) {
-          lines.push(`File: ${c.filePath}`);
+          lines.push(`[FILE]: ${c.filePath}`);
         }
         if (c.filesChanged.length > 0) {
-          lines.push(`Other files in commit: ${c.filesChanged.join(', ')}`);
+          lines.push(`[OTHER FILES]: ${c.filesChanged.join(', ')}`);
         }
         if (c.condensedDiff) {
-          lines.push(`Diff:\n${c.condensedDiff}`);
+          lines.push(`[DIFF]:\n${c.condensedDiff}`);
         }
         return lines.join('\n');
       })

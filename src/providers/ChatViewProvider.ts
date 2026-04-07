@@ -95,6 +95,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.ragEngine.onConfigChanged();
   }
 
+  public async handleExplainLine(filePath: string, line: number): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage('Git-Lore: No workspace folder open.');
+      return;
+    }
+
+    // Ensure sidebar is visible
+    await vscode.commands.executeCommand('gitlore.chatView.focus');
+
+    const { GitProcessor } = await import('../services/GitProcessor');
+    const gitProcessor = new GitProcessor(workspaceFolder.uri.fsPath);
+
+    const blame = await gitProcessor.blameLineHash(filePath, line);
+    if (!blame) {
+      this.postMessage({ command: 'error', payload: { message: `Could not determine blame for ${filePath}:${line}` } });
+      return;
+    }
+
+    // Build a targeted query and send it through the normal query pipeline
+    const question = `Tell me the lore behind commit ${blame.hash.substring(0, 8)} by ${blame.author}. ` +
+      `The commit message was: "${blame.message}". ` +
+      `Specifically, why was line ${line} of \`${filePath}\` changed? What was the context and motivation?`;
+
+    await this.handleQuery(question);
+  }
+
   public async handleSummarizeRecent(): Promise<void> {
     const messageId = crypto.randomUUID();
 
