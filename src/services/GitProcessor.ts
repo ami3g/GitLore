@@ -111,6 +111,91 @@ export class GitProcessor {
     return chunks;
   }
 
+  /**
+   * Extract only commits newer than `sinceHash`.
+   * Uses `git log sinceHash..HEAD` to get the delta.
+   */
+  async extractNewCommits(
+    sinceHash: string,
+    maxCount: number,
+    onProgress?: ProgressCallback
+  ): Promise<CommitChunk[]> {
+    onProgress?.('Checking for new commits', 0, 0);
+
+    const log = await this.git.log({ maxCount, from: sinceHash, to: 'HEAD', '--all': null });
+    const commits = log.all as ReadonlyArray<DefaultLogFields & ListLogLine>;
+
+    if (commits.length === 0) {
+      return [];
+    }
+
+    const total = commits.length;
+    const chunks: CommitChunk[] = [];
+
+    for (let i = 0; i < total; i++) {
+      const commit = commits[i];
+      onProgress?.('Processing new commits', i + 1, total);
+
+      try {
+        const diff = await this.getDiffForCommit(commit.hash);
+        const fileDiffs = this.splitDiffByFile(diff);
+        const allFiles = fileDiffs.map((fd) => fd.filePath);
+
+        if (fileDiffs.length === 0) {
+          chunks.push({
+            hash: commit.hash,
+            author: commit.author_name,
+            date: commit.date,
+            message: commit.message,
+            filePath: '',
+            condensedDiff: '',
+            filesChanged: [],
+          });
+          continue;
+        }
+
+        for (const fd of fileDiffs) {
+          const budget = budgetFor(fd.filePath);
+          const condensed = this.condenseFileDiff(fd.rawDiff, budget);
+
+          chunks.push({
+            hash: commit.hash,
+            author: commit.author_name,
+            date: commit.date,
+            message: commit.message,
+            filePath: fd.filePath,
+            condensedDiff: condensed,
+            filesChanged: allFiles,
+          });
+        }
+      } catch {
+        chunks.push({
+          hash: commit.hash,
+          author: commit.author_name,
+          date: commit.date,
+          message: commit.message,
+          filePath: '',
+          condensedDiff: '',
+          filesChanged: [],
+        });
+      }
+    }
+
+    return chunks;
+  }
+
+  /**
+   * Get the latest commit hash in the repo.
+   */
+  async getLatestHash(): Promise<string | null> {
+    try {
+      const log = await this.git.log({ maxCount: 1 });
+      return log.latest?.hash ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async getDiffForCommit(hash: string): Promise<string> {
     const result = await this.git.show([
       hash,

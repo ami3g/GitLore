@@ -43,25 +43,64 @@ export class RAGEngine {
     const storePath = this.getStorePath(repoPath);
     this.ensureDir(storePath);
 
-    // Step 1: Extract & chunk commits
-    onProgress?.('Initializing Git processor', 0, commitDepth);
     const gitProcessor = new GitProcessor(repoPath);
-    const chunks = await gitProcessor.extractAndChunk(commitDepth, onProgress);
-
-    if (chunks.length === 0) {
-      throw new Error('No commits found in this repository.');
-    }
-
-    // Step 2: Generate embeddings
-    const embedding = this.getEmbeddingService(storePath);
-    const texts = chunks.map((c) => gitProcessor.toEmbeddingText(c));
-    const embeddings = await embedding.embedBatch(texts, onProgress);
-
-    // Step 3: Store in vector DB
-    onProgress?.('Storing in vector database', 0, 1);
     const store = this.getVectorStore(storePath);
-    await store.createTable(chunks, embeddings);
-    onProgress?.('Indexing complete', 1, 1);
+    const embedding = this.getEmbeddingService(storePath);
+
+    // Check if we can do an incremental index
+    const meta = store.loadMeta();
+    const isAlreadyIndexed = await store.isIndexed();
+
+    if (meta?.lastIndexedHash && isAlreadyIndexed) {
+      // ─── Incremental: only new commits ───
+      onProgress?.('Checking for new commits', 0, 0);
+      const newChunks = await gitProcessor.extractNewCommits(
+        meta.lastIndexedHash,
+        commitDepth,
+        onProgress
+      );
+
+      if (newChunks.length === 0) {
+        onProgress?.('Already up to date', 1, 1);
+        return;
+      }
+
+      // Embed only the new chunks
+      const texts = newChunks.map((c) => gitProcessor.toEmbeddingText(c));
+      const embeddings = await embedding.embedBatch(texts, onProgress);
+
+      // Append to existing table
+      onProgress?.('Appending to vector database', 0, 1);
+      await store.addRecords(newChunks, embeddings);
+
+      // Update metadata with latest hash
+      const latestHash = await gitProcessor.getLatestHash();
+      if (latestHash) {
+        store.saveMeta(latestHash);
+      }
+      onProgress?.(`Incremental index complete — ${newChunks.length} new chunks`, 1, 1);
+    } else {
+      // ─── Full index ───
+      onProgress?.('Initializing Git processor', 0, commitDepth);
+      const chunks = await gitProcessor.extractAndChunk(commitDepth, onProgress);
+
+      if (chunks.length === 0) {
+        throw new Error('No commits found in this repository.');
+      }
+
+      const texts = chunks.map((c) => gitProcessor.toEmbeddingText(c));
+      const embeddings = await embedding.embedBatch(texts, onProgress);
+
+      onProgress?.('Storing in vector database', 0, 1);
+      await store.createTable(chunks, embeddings);
+
+      // Save metadata for future incremental runs
+      const latestHash = await gitProcessor.getLatestHash();
+      if (latestHash) {
+        store.saveMeta(latestHash);
+      }
+      onProgress?.('Indexing complete', 1, 1);
+    }
   }
 
   // ─── Querying ───

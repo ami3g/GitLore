@@ -1,8 +1,16 @@
 import * as lancedb from '@lancedb/lancedb';
 import type { Table } from '@lancedb/lancedb';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { CommitChunk, SearchResult, IndexStatus } from '../types';
 
 const TABLE_NAME = 'commits';
+const META_FILE = 'index-meta.json';
+
+interface IndexMeta {
+  lastIndexedHash: string;
+  lastIndexedAt: string;
+}
 
 type CommitRecord = Record<string, unknown> & {
   vector: number[];
@@ -58,6 +66,53 @@ export class VectorStore {
     this.table = await db.createTable(TABLE_NAME, records);
   }
 
+  /**
+   * Append new records to an existing table (incremental indexing).
+   */
+  async addRecords(
+    chunks: CommitChunk[],
+    embeddings: number[][]
+  ): Promise<void> {
+    const table = await this.getTable();
+    if (!table) {
+      throw new Error('Cannot append — no existing index. Run a full index first.');
+    }
+
+    const records: CommitRecord[] = chunks.map((chunk, i) => ({
+      vector: embeddings[i],
+      hash: chunk.hash,
+      author: chunk.author,
+      date: chunk.date,
+      message: chunk.message,
+      filePath: chunk.filePath,
+      condensedDiff: chunk.condensedDiff,
+      filesChanged: chunk.filesChanged.join(','),
+    }));
+
+    await table.add(records);
+  }
+
+  // ─── Metadata persistence ───
+
+  saveMeta(lastIndexedHash: string): void {
+    const meta: IndexMeta = {
+      lastIndexedHash,
+      lastIndexedAt: new Date().toISOString(),
+    };
+    const metaPath = path.join(this.dbPath, '..', META_FILE);
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  }
+
+  loadMeta(): IndexMeta | null {
+    const metaPath = path.join(this.dbPath, '..', META_FILE);
+    try {
+      const raw = fs.readFileSync(metaPath, 'utf-8');
+      return JSON.parse(raw) as IndexMeta;
+    } catch {
+      return null;
+    }
+  }
+
   async search(queryEmbedding: number[], topK: number): Promise<SearchResult[]> {
     const table = await this.getTable();
     if (!table) {
@@ -91,14 +146,16 @@ export class VectorStore {
   async getStatus(): Promise<IndexStatus> {
     const table = await this.getTable();
     if (!table) {
-      return { indexed: false, commitCount: 0, lastIndexedAt: null };
+      return { indexed: false, commitCount: 0, lastIndexedAt: null, lastIndexedHash: null };
     }
 
     const count = await table.countRows();
+    const meta = this.loadMeta();
     return {
       indexed: true,
       commitCount: count,
-      lastIndexedAt: new Date().toISOString(),
+      lastIndexedAt: meta?.lastIndexedAt ?? new Date().toISOString(),
+      lastIndexedHash: meta?.lastIndexedHash ?? null,
     };
   }
 
@@ -109,6 +166,9 @@ export class VectorStore {
     } catch {
       // Table doesn't exist — OK
     }
+    // Remove metadata file
+    const metaPath = path.join(this.dbPath, '..', META_FILE);
+    try { fs.unlinkSync(metaPath); } catch { /* OK */ }
     this.table = null;
   }
 

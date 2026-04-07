@@ -14,6 +14,7 @@ export interface IndexStatus {
   indexed: boolean;
   commitCount: number;
   lastIndexedAt: string | null;
+  lastIndexedHash: string | null;
 }
 
 // ─── Search ───

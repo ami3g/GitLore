@@ -67,7 +67,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const status = await this.ragEngine.getStatus();
       this.postMessage({ command: 'indexComplete', payload: status });
       vscode.window.showInformationMessage(
-        `Git-Lore: Indexed ${status.commitCount} commits.`
+        `Git-Lore: Indexed ${status.commitCount} chunks.`
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -81,7 +81,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.ragEngine.clearIndex();
       this.postMessage({
         command: 'indexComplete',
-        payload: { indexed: false, commitCount: 0, lastIndexedAt: null },
+        payload: { indexed: false, commitCount: 0, lastIndexedAt: null, lastIndexedHash: null },
       });
       vscode.window.showInformationMessage('Git-Lore: Index cleared.');
     } catch (err: unknown) {
