@@ -448,13 +448,14 @@ export class RAGEngine {
       allCandidates.sort((a, b) => a.score - b.score);
     }
 
-    // ─── 3c. Symbol discovery for trace / implementation queries ───
-    // When implementation intent is significant, extract potential symbol names from the
-    // query and boost code chunks whose function lists contain them — even nested functions
-    // that aren't top-level exports. This ensures e.g. "How does next() work?" surfaces
-    // the file containing the core iterator loop.
+    // ─── 3c. Symbol discovery + explicit file mention ───
+    // Extract queried symbols and explicitly mentioned file paths from the question.
+    // Boost chunks that match symbols via AST metadata OR content scan (for closures
+    // like `function next()` / `var next = function()` that AST metadata may miss).
     const querySymbols: string[] = [];
+    const mentionedFiles: string[] = [];
     if (weights.distribution.implementation > 0.4) {
+      // Extract symbol names from function-call syntax in the question
       const symbolPattern = /\b([a-zA-Z_$][\w$]*)\s*\(/g;
       let m: RegExpExecArray | null;
       while ((m = symbolPattern.exec(question)) !== null) {
@@ -466,14 +467,46 @@ export class RAGEngine {
         if (!querySymbols.includes(sym.toLowerCase())) querySymbols.push(sym.toLowerCase());
       }
       if (querySymbols.length > 0) {
+        // Build a regex to find symbols in chunk CONTENT (catches closures/nested fns
+        // that AST metadata may miss, e.g. `var next = function(){}`)
+        const symContentRe = new RegExp(
+          `(?:function\\s+(?:${querySymbols.join('|')})\\b|(?:var|let|const)\\s+(?:${querySymbols.join('|')})\\s*=\\s*function)`,
+          'i'
+        );
         for (const r of allCandidates) {
           if (r.type !== 'code') continue;
           const fns = (r.chunk.functions || []).map(f => f.toLowerCase());
+          let matched = false;
           for (const sym of querySymbols) {
             if (fns.some(f => f === sym || f.includes(sym))) {
-              r.score *= 0.4; // 60% boost — these are the files we need
+              matched = true;
               break;
             }
+          }
+          // Fallback: scan chunk content for function declarations/expressions
+          if (!matched && symContentRe.test(r.chunk.content)) {
+            matched = true;
+          }
+          if (matched) {
+            r.score *= 0.4; // 60% boost — these are the files we need
+          }
+        }
+        allCandidates.sort((a, b) => a.score - b.score);
+      }
+
+      // Extract explicitly mentioned file paths from the question
+      // Matches patterns like lib/router/index.js, src/app.ts, etc.
+      const filePathRe = /(?:^|\s|['"`])((?:[\w.-]+\/)+[\w.-]+\.[a-z]{1,4})\b/gi;
+      let fp: RegExpExecArray | null;
+      while ((fp = filePathRe.exec(question)) !== null) {
+        mentionedFiles.push(fp[1]);
+      }
+      // Boost chunks from explicitly mentioned files
+      if (mentionedFiles.length > 0) {
+        for (const r of allCandidates) {
+          if (r.type !== 'code') continue;
+          if (mentionedFiles.some(mf => r.chunk.filePath === mf || r.chunk.filePath.endsWith('/' + mf) || r.chunk.filePath.endsWith('\\' + mf))) {
+            r.score *= 0.3; // 70% boost for explicitly referenced files
           }
         }
         allCandidates.sort((a, b) => a.score - b.score);
@@ -535,6 +568,24 @@ export class RAGEngine {
       }
     }
 
+    // ─── 4c. Force-expand explicitly mentioned files ───
+    // When the user names a file directly (e.g. "lib/router/index.js"),
+    // always include it in the expansion set regardless of vector rank.
+    if (mentionedFiles.length > 0) {
+      // Resolve mentioned paths against known file paths from allCandidates
+      const knownPaths = new Set<string>();
+      for (const r of allCandidates) {
+        if (r.type === 'code') knownPaths.add(r.chunk.filePath);
+      }
+      for (const mf of mentionedFiles) {
+        const match = [...knownPaths].find(kp => kp === mf || kp.endsWith('/' + mf) || kp.endsWith('\\' + mf));
+        if (match && !seenFiles.has(match)) {
+          seenFiles.add(match);
+          topCodeFiles.push(match);
+        }
+      }
+    }
+
     // Fetch all chunks for those files and build smart-expanded content
     const expandedFiles = new Map<string, string>();
     if (topCodeFiles.length > 0) {
@@ -547,42 +598,76 @@ export class RAGEngine {
 
         // ─── Contextual Expansion ───
         // For trace queries: if a chunk contains a queried symbol (e.g. next) as a
-        // nested function, find the parent function that spans it and force-expand
-        // ALL chunks belonging to the parent. This ensures the LLM sees the entire
-        // loop + closure together, not just the small chunk where next is defined.
+        // nested function/closure, find the parent function that spans it and
+        // force-expand ALL chunks belonging to the parent. This ensures the LLM
+        // sees the loop + closure together.
+        //
+        // Detection uses BOTH AST metadata (chunk.functions) AND content scanning
+        // (for closures like `var next = function(){}` that AST may not tag).
         const contextExpandedKeys = new Set<string>();
         if (querySymbols.length > 0) {
+          // Build content-scan regex for symbol detection in chunk bodies
+          const symDefRe = new RegExp(
+            `(?:function\\s+(?:${querySymbols.join('|')})\\b|(?:var|let|const)\\s+(?:${querySymbols.join('|')})\\s*=\\s*function)`,
+            'i'
+          );
+          // Helper: get all function names from a chunk (metadata + content scan)
+          const getChunkFns = (c: import('../types').CodeChunk): string[] => {
+            const fns = (c.functions || []).map(f => f.toLowerCase());
+            // Also extract function declarations/expressions from content
+            const contentFnRe = /(?:function\s+([a-zA-Z_$][\w$]*)|\b(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*function)\b/g;
+            let match: RegExpExecArray | null;
+            while ((match = contentFnRe.exec(c.content)) !== null) {
+              const name = (match[1] || match[2]).toLowerCase();
+              if (!fns.includes(name)) fns.push(name);
+            }
+            // Also extract proto.method / exports.method patterns
+            const protoFnRe = /(?:proto|exports|module\.exports)\.\s*([a-zA-Z_$][\w$]*)\s*=\s*function\b/g;
+            while ((match = protoFnRe.exec(c.content)) !== null) {
+              const name = match[1].toLowerCase();
+              if (!fns.includes(name)) fns.push(name);
+            }
+            return fns;
+          };
+          // Helper: does a chunk contain any queried symbol?
+          const chunkHasSymbol = (c: import('../types').CodeChunk): boolean => {
+            const fns = getChunkFns(c);
+            if (querySymbols.some(sym => fns.some(f => f === sym || f.includes(sym)))) return true;
+            // Fallback: content regex scan
+            return symDefRe.test(c.content);
+          };
+          // Helper: does a chunk contain a specific parent function?
+          const chunkHasParent = (c: import('../types').CodeChunk, parent: string): boolean => {
+            const fns = getChunkFns(c);
+            return fns.some(f => f === parent || f.includes(parent));
+          };
+
           for (let ci = 0; ci < fileChunks.length; ci++) {
             const chunk = fileChunks[ci];
-            const fns = (chunk.functions || []).map(f => f.toLowerCase());
-            // Does this chunk contain any queried symbol?
-            const hasSymbol = querySymbols.some(sym => fns.some(f => f === sym || f.includes(sym)));
-            if (!hasSymbol) continue;
+            if (!chunkHasSymbol(chunk)) continue;
 
+            const fns = getChunkFns(chunk);
             // Find the parent function: the outermost function in this chunk that
             // isn't the symbol itself. For expressjs, next() is inside proto.handle —
             // so `fns` would be ['handle', 'next'] and parent = 'handle'.
             const parentFn = fns.find(f => !querySymbols.some(sym => f === sym || f.includes(sym))) || fns[0];
+            if (!parentFn) continue;
 
             // Mark this chunk as force-expanded
             contextExpandedKeys.add(`${chunk.filePath}:${chunk.startLine}`);
 
             // Walk backward: expand preceding chunks that share the parent function
             for (let bi = ci - 1; bi >= 0; bi--) {
-              const prev = fileChunks[bi];
-              const prevFns = (prev.functions || []).map(f => f.toLowerCase());
-              if (prevFns.some(f => f === parentFn || f.includes(parentFn))) {
-                contextExpandedKeys.add(`${prev.filePath}:${prev.startLine}`);
+              if (chunkHasParent(fileChunks[bi], parentFn)) {
+                contextExpandedKeys.add(`${fileChunks[bi].filePath}:${fileChunks[bi].startLine}`);
               } else {
-                break; // parent function no longer present → stop walking
+                break;
               }
             }
             // Walk forward: expand following chunks that share the parent function
             for (let fi = ci + 1; fi < fileChunks.length; fi++) {
-              const next = fileChunks[fi];
-              const nextFns = (next.functions || []).map(f => f.toLowerCase());
-              if (nextFns.some(f => f === parentFn || f.includes(parentFn))) {
-                contextExpandedKeys.add(`${next.filePath}:${next.startLine}`);
+              if (chunkHasParent(fileChunks[fi], parentFn)) {
+                contextExpandedKeys.add(`${fileChunks[fi].filePath}:${fileChunks[fi].startLine}`);
               } else {
                 break;
               }

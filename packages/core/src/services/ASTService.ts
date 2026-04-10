@@ -48,6 +48,15 @@ const TS_QUERY = `
 (method_definition
   name: (property_identifier) @method.name) @method.def
 
+(variable_declarator
+  name: (identifier) @fn.name
+  value: (function_expression
+    parameters: (formal_parameters) @fn.params)) @fn.def
+
+(variable_declarator
+  name: (identifier) @fn.name
+  value: (arrow_function)) @fn.def
+
 (call_expression
   function: [
     (identifier) @call.name
@@ -72,6 +81,21 @@ const JS_QUERY = `
 
 (method_definition
   name: (property_identifier) @method.name) @method.def
+
+(variable_declarator
+  name: (identifier) @fn.name
+  value: (function_expression
+    parameters: (formal_parameters) @fn.params)) @fn.def
+
+(variable_declarator
+  name: (identifier) @fn.name
+  value: (arrow_function)) @fn.def
+
+(assignment_expression
+  left: (member_expression
+    property: (property_identifier) @fn.name)
+  right: (function_expression
+    parameters: (formal_parameters) @fn.params)) @fn.def
 
 (call_expression
   function: [
