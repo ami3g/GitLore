@@ -571,14 +571,12 @@ export class RAGEngine {
     // ─── 4c. Force-expand explicitly mentioned files ───
     // When the user names a file directly (e.g. "lib/router/index.js"),
     // always include it in the expansion set regardless of vector rank.
+    // Resolve against the FULL file index, not just current candidates,
+    // because the mentioned file may have zero chunks in vector results.
     if (mentionedFiles.length > 0) {
-      // Resolve mentioned paths against known file paths from allCandidates
-      const knownPaths = new Set<string>();
-      for (const r of allCandidates) {
-        if (r.type === 'code') knownPaths.add(r.chunk.filePath);
-      }
+      const allIndexedPaths = await store.getAllUniqueFilePaths();
       for (const mf of mentionedFiles) {
-        const match = [...knownPaths].find(kp => kp === mf || kp.endsWith('/' + mf) || kp.endsWith('\\' + mf));
+        const match = allIndexedPaths.find(kp => kp === mf || kp.endsWith('/' + mf) || kp.endsWith('\\' + mf));
         if (match && !seenFiles.has(match)) {
           seenFiles.add(match);
           topCodeFiles.push(match);

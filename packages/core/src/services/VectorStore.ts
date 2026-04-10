@@ -41,6 +41,10 @@ type CodeRecord = Record<string, unknown> & {
   endLine: number;
   content: string;
   isSummary: number; // 1 for summary, 0 for detail (LanceDB doesn't persist booleans well)
+  functions: string; // JSON-serialized string[] of function names in this chunk
+  classes: string;   // JSON-serialized string[] of class names
+  imports: string;   // JSON-serialized string[] of import sources
+  exports: string;   // JSON-serialized string[] of export names
 };
 
 type PRRecord = Record<string, unknown> & {
@@ -267,6 +271,10 @@ export class VectorStore {
       endLine: chunk.endLine,
       content: chunk.content,
       isSummary: chunk.isSummary ? 1 : 0,
+      functions: JSON.stringify(chunk.functions || []),
+      classes: JSON.stringify(chunk.classes || []),
+      imports: JSON.stringify(chunk.imports || []),
+      exports: JSON.stringify(chunk.exports || []),
     }));
 
     try {
@@ -293,6 +301,10 @@ export class VectorStore {
       endLine: chunk.endLine,
       content: chunk.content,
       isSummary: chunk.isSummary ? 1 : 0,
+      functions: JSON.stringify(chunk.functions || []),
+      classes: JSON.stringify(chunk.classes || []),
+      imports: JSON.stringify(chunk.imports || []),
+      exports: JSON.stringify(chunk.exports || []),
     }));
 
     await table.add(records);
@@ -334,6 +346,10 @@ export class VectorStore {
         endLine: chunk.endLine,
         content: chunk.content,
         isSummary: chunk.isSummary ? 1 : 0,
+        functions: JSON.stringify(chunk.functions || []),
+        classes: JSON.stringify(chunk.classes || []),
+        imports: JSON.stringify(chunk.imports || []),
+        exports: JSON.stringify(chunk.exports || []),
       }));
       await table.add(records);
     }
@@ -527,14 +543,22 @@ export class VectorStore {
       .toArray();
 
     return rows
-      .map((row) => ({
-        filePath: row['filePath'] as string,
-        language: row['language'] as string,
-        startLine: row['startLine'] as number,
-        endLine: row['endLine'] as number,
-        content: row['content'] as string,
-        isSummary: (row['isSummary'] as number) === 1,
-      }))
+      .map((row) => {
+        const chunk: CodeChunk = {
+          filePath: row['filePath'] as string,
+          language: row['language'] as string,
+          startLine: row['startLine'] as number,
+          endLine: row['endLine'] as number,
+          content: row['content'] as string,
+          isSummary: (row['isSummary'] as number) === 1,
+        };
+        // Restore AST metadata (JSON-serialized strings → arrays)
+        try { const fns = JSON.parse((row['functions'] as string) || '[]'); if (fns.length) chunk.functions = fns; } catch { /* old index */ }
+        try { const cls = JSON.parse((row['classes'] as string) || '[]'); if (cls.length) chunk.classes = cls; } catch { /* old index */ }
+        try { const imp = JSON.parse((row['imports'] as string) || '[]'); if (imp.length) chunk.imports = imp; } catch { /* old index */ }
+        try { const exp = JSON.parse((row['exports'] as string) || '[]'); if (exp.length) chunk.exports = exp; } catch { /* old index */ }
+        return chunk;
+      })
       .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine);
   }
 
