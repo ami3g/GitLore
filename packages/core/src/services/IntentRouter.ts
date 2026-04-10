@@ -14,6 +14,8 @@ export interface IntentWeights {
   pr: number;
   /** Raw soft-max distribution across all intents (sums to ~1.0) */
   distribution: Record<QueryIntent, number>;
+  /** Fraction of snippet budget allocated to code results (0–1). Remainder goes to commits/PRs. */
+  codeBudgetRatio: number;
 }
 
 // ─── Keyword dictionaries (lowercase, checked via word-boundary regex) ───
@@ -39,13 +41,19 @@ const IMPLEMENTATION_SIGNALS = [
   'declaration', 'signature', 'return', 'parameter', 'type',
   'architecture', 'structure', 'pattern', 'design', 'call',
   'api', 'endpoint', 'schema', 'model', 'component',
+  // Trace / flow keywords (code-heavy intent, not debugging)
+  'trace', 'flow', 'middleware', 'chain', 'pipeline',
+  'dispatch', 'route', 'handle', 'process', 'traverse',
+  'walk', 'step.*through', 'iterator', 'next',
 ];
 
 const DEBUGGING_SIGNALS = [
   'bug', 'fix', 'error', 'broken', 'crash', 'fail', 'exception',
   'regression', 'revert', 'bisect', 'blame', 'cause', 'broke',
-  'debug', 'trace', 'stack', 'issue', 'wrong', 'unexpected',
+  'debug', 'stack', 'issue', 'wrong', 'unexpected',
   'null', 'undefined', 'timeout', 'leak', 'corrupt',
+  // Root-cause / "why did this break" keywords
+  'root.*cause', 'broke.*after', 'since.*commit',
 ];
 
 function buildPattern(words: string[]): RegExp {
@@ -73,6 +81,16 @@ const INTENT_PROFILES: Record<QueryIntent, { commit: number; code: number; pr: n
   implementation: { commit: 0.8, code: 1.5, pr: 0.9 },
   debugging:      { commit: 1.5, code: 1.2, pr: 0.7 },
   general:        { commit: 1.0, code: 1.0, pr: 1.0 },
+};
+
+// ─── Elastic budget ratios: fraction of snippet budget given to CODE (rest → commits/PRs) ───
+// Trace/Implementation → 80% code, Root-Cause/Why → 20% code, Refactor-like → 50/50
+const CODE_BUDGET_RATIOS: Record<QueryIntent, number> = {
+  overview:       0.70,
+  historical:     0.20,
+  implementation: 0.80,
+  debugging:      0.20,
+  general:        0.50,
 };
 
 /**
@@ -112,7 +130,7 @@ export function classifyIntent(query: string): IntentWeights {
   // No strong signal → pure general (uniform)
   if (maxCount === 0) {
     const dist: Record<QueryIntent, number> = { overview: 0, historical: 0, implementation: 0, debugging: 0, general: 1.0 };
-    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0, distribution: dist };
+    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0, distribution: dist, codeBudgetRatio: 0.50 };
   }
 
   // Give 'general' a small base score (acts as smoothing / floor)
@@ -140,7 +158,13 @@ export function classifyIntent(query: string): IntentWeights {
     pr += probs[i] * profile.pr;
   }
 
-  return { intent, commit, code, pr, distribution };
+  // Blend elastic code budget ratio from distribution
+  let codeBudgetRatio = 0;
+  for (let i = 0; i < intentNames.length; i++) {
+    codeBudgetRatio += probs[i] * CODE_BUDGET_RATIOS[intentNames[i]];
+  }
+
+  return { intent, commit, code, pr, distribution, codeBudgetRatio };
 }
 
 import type { SearchResult } from '../types';

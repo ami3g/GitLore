@@ -448,6 +448,38 @@ export class RAGEngine {
       allCandidates.sort((a, b) => a.score - b.score);
     }
 
+    // ─── 3c. Symbol discovery for trace / implementation queries ───
+    // When implementation intent is significant, extract potential symbol names from the
+    // query and boost code chunks whose function lists contain them — even nested functions
+    // that aren't top-level exports. This ensures e.g. "How does next() work?" surfaces
+    // the file containing the core iterator loop.
+    if (weights.distribution.implementation > 0.4) {
+      const symbolPattern = /\b([a-zA-Z_$][\w$]*)\s*\(/g;
+      const querySymbols: string[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = symbolPattern.exec(question)) !== null) {
+        querySymbols.push(m[1].toLowerCase());
+      }
+      // Also check for common core-loop keywords even without parens
+      const CORE_LOOP_RE = /\b(next|handle|dispatch|process|route|iterate|middleware|resolver)\b/gi;
+      for (const sym of (question.match(CORE_LOOP_RE) || [])) {
+        if (!querySymbols.includes(sym.toLowerCase())) querySymbols.push(sym.toLowerCase());
+      }
+      if (querySymbols.length > 0) {
+        for (const r of allCandidates) {
+          if (r.type !== 'code') continue;
+          const fns = (r.chunk.functions || []).map(f => f.toLowerCase());
+          for (const sym of querySymbols) {
+            if (fns.some(f => f === sym || f.includes(sym))) {
+              r.score *= 0.4; // 60% boost — these are the files we need
+              break;
+            }
+          }
+        }
+        allCandidates.sort((a, b) => a.score - b.score);
+      }
+    }
+
     // ─── 4. Smart file expansion (AST-aware) ───
     // Instead of hard-truncating at N chars, we use chunk metadata:
     //   - Chunks that were direct vector search hits → include FULL content
@@ -472,6 +504,34 @@ export class RAGEngine {
         seenFiles.add(r.chunk.filePath);
         topCodeFiles.push(r.chunk.filePath);
         if (topCodeFiles.length >= EXPAND_FILES) break;
+      }
+    }
+
+    // ─── 4b. Anchor file persistence for trace / implementation queries ───
+    // Central files (highest call-graph connectivity) should always have their
+    // skeletons injected into the prompt for trace queries, even if their vector
+    // rank is low. This ensures "hub" files like lib/application.js or
+    // lib/router/index.js are always visible to the LLM.
+    if (weights.distribution.implementation > 0.4) {
+      const allEdges = await store.getAllCallGraphEdges();
+      const fileDegree = new Map<string, number>();
+      for (const e of allEdges) {
+        fileDegree.set(e.callerFile, (fileDegree.get(e.callerFile) ?? 0) + 1);
+        if (e.calleeFile !== e.callerFile) {
+          fileDegree.set(e.calleeFile, (fileDegree.get(e.calleeFile) ?? 0) + 1);
+        }
+      }
+      // Top 3 most-connected files = anchor files
+      const anchorFiles = [...fileDegree.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([fp]) => fp);
+
+      for (const af of anchorFiles) {
+        if (!seenFiles.has(af)) {
+          seenFiles.add(af);
+          topCodeFiles.push(af);
+        }
       }
     }
 
@@ -518,20 +578,25 @@ export class RAGEngine {
       }
     }
 
-    // ─── 5. Greedy token filling with diversity ───
-    // Reserve ~10K for system prompt (~3K), structural context, file tree, conversation
-    // history, and the question itself. Everything else goes to retrieved snippets.
+    // ─── 5. Greedy token filling with elastic budget ───
+    // Split the snippet budget between code and commits/PRs based on intent.
+    // Trace/Implementation: 80% code / 20% commits
+    // Root Cause / Why:     20% code / 80% commits
+    // General / Refactor:   50% / 50%
     const snippetBudget = MAX_PROMPT_CHARS - 10000;
-    let usedChars = 0;
+    const codeBudget = Math.floor(snippetBudget * weights.codeBudgetRatio);
+    const commitBudget = snippetBudget - codeBudget;
+    let usedCodeChars = 0;
+    let usedCommitChars = 0;
     const merged: SearchResult[] = [];
     const usedIndices = new Set<number>();
 
     // Track which files have expanded (full-file) content — only skip individual chunks for THOSE files
     const expandedFileSet = new Set(expandedFiles.keys());
 
-    // Account for expanded files in the char budget (they use prompt space too)
+    // Account for expanded files in the CODE budget (they use prompt space too)
     for (const [, content] of expandedFiles) {
-      usedChars += content.length + 100; // +100 for header formatting
+      usedCodeChars += content.length + 100; // +100 for header formatting
     }
 
     // For each expanded file, add ONE representative code result to `merged` so the
@@ -557,13 +622,14 @@ export class RAGEngine {
         const result = allCandidates[seedIdx];
         const charCost = this.estimateSnippetChars(result);
         merged.push(result);
-        usedChars += charCost;
+        if (result.type === 'code') usedCodeChars += charCost; else usedCommitChars += charCost;
         usedIndices.add(seedIdx);
       }
     }
 
-    // Fill greedily; skip individual chunks ONLY for files that have expanded content.
-    // Allow multiple chunks from the same non-expanded file (different functions/symbols).
+    // Fill greedily respecting per-stream budgets.
+    // Skip individual chunks ONLY for files that have expanded content.
+    // When one stream is full, keep filling the other until total budget is exhausted.
     for (let i = 0; i < allCandidates.length; i++) {
       if (usedIndices.has(i)) continue;
       const result = allCandidates[i];
@@ -572,15 +638,29 @@ export class RAGEngine {
       if (result.type === 'code' && expandedFileSet.has(result.chunk.filePath)) continue;
 
       const charCost = this.estimateSnippetChars(result);
-      if (usedChars + charCost > snippetBudget && merged.length > 0) break;
+      const totalUsed = usedCodeChars + usedCommitChars;
+
+      if (result.type === 'code') {
+        // Allow overflow into commit budget only if the code budget is nearly full
+        if (usedCodeChars + charCost > codeBudget && totalUsed + charCost > snippetBudget) continue;
+        usedCodeChars += charCost;
+      } else {
+        if (usedCommitChars + charCost > commitBudget && totalUsed + charCost > snippetBudget) continue;
+        usedCommitChars += charCost;
+      }
+      if (totalUsed + charCost > snippetBudget && merged.length > 0) break;
       merged.push(result);
-      usedChars += charCost;
     }
+
+    const usedChars = usedCodeChars + usedCommitChars;
 
     console.error(
       `[RAGEngine] Pipeline: ${allCandidates.length} candidates → ` +
       `${expandedFiles.size} expanded files + ${merged.length - expandedFilesAdded.size} additional snippets = ` +
-      `${merged.length} total in prompt (${Math.round(usedChars / 1000)}K chars of ${Math.round(snippetBudget / 1000)}K budget)`
+      `${merged.length} total in prompt ` +
+      `(code: ${Math.round(usedCodeChars / 1000)}K/${Math.round(codeBudget / 1000)}K, ` +
+      `commits: ${Math.round(usedCommitChars / 1000)}K/${Math.round(commitBudget / 1000)}K, ` +
+      `ratio: ${Math.round(weights.codeBudgetRatio * 100)}% code [${weights.intent}])`
     );
 
     // ─── 6. Project file tree for broad queries ───
