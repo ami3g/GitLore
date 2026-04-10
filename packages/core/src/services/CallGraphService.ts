@@ -246,13 +246,16 @@ export class CallGraphService {
       }
     }
 
-    // Track pairwise co-occurrence: decayed weight sum + raw count + most-recent commit
+    // Track pairwise co-occurrence: decayed weight sum + raw count + most-recent + earliest commit
     interface PairInfo {
       decayedWeight: number;
       rawCount: number;
       latestHash: string;
       latestDate: string;
       latestTimestamp: number;
+      earliestHash: string;
+      earliestDate: string;
+      earliestTimestamp: number;
     }
     const pairInfo = new Map<string, PairInfo>();
 
@@ -280,6 +283,11 @@ export class CallGraphService {
               existing.latestDate = date;
               existing.latestTimestamp = commitTime;
             }
+            if (commitTime < existing.earliestTimestamp) {
+              existing.earliestHash = hash;
+              existing.earliestDate = date;
+              existing.earliestTimestamp = commitTime;
+            }
           } else {
             pairInfo.set(key, {
               decayedWeight: decayFactor,
@@ -287,6 +295,9 @@ export class CallGraphService {
               latestHash: hash,
               latestDate: date,
               latestTimestamp: commitTime,
+              earliestHash: hash,
+              earliestDate: date,
+              earliestTimestamp: commitTime,
             });
           }
         }
@@ -317,8 +328,11 @@ export class CallGraphService {
         line: 0,
         edgeType: 'co-change',
         weight,
+        rawCount: info.rawCount,
         latestCommitHash: info.latestHash,
         latestCommitDate: info.latestDate,
+        earliestCommitHash: info.earliestHash,
+        earliestCommitDate: info.earliestDate,
       });
     }
 

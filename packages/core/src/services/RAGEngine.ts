@@ -620,19 +620,27 @@ export class RAGEngine {
           lines.push(`  Called by: ${callers.slice(0, 15).join(', ')}`);
         }
         if (coChangeEdges.length > 0) {
-          // Only surface top 5 highest-weight co-change edges to avoid prompt clutter
-          // Include relative age so the LLM can distinguish modern patterns from legacy
-          const coChanged = coChangeEdges
+          // Dual-stream format: show raw count, latest commit (Modern/Stale), and earliest commit (Legacy Peak)
+          const topEdges = coChangeEdges
             .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
-            .slice(0, 5)
-            .map((e) => {
-              const otherFile = e.callerFile === fp ? e.calleeFile : e.callerFile;
-              const age = e.latestCommitDate ? this.relativeAge(e.latestCommitDate) : '';
-              const hashShort = e.latestCommitHash ? e.latestCommitHash.substring(0, 8) : '';
-              const detail = age && hashShort ? ` — last: ${hashShort} (${age})` : '';
-              return `${otherFile} (score ${e.weight}${detail})`;
-            });
-          lines.push(`  Frequently changed with: ${coChanged.join(', ')}`);
+            .slice(0, 5);
+          for (const e of topEdges) {
+            const otherFile = e.callerFile === fp ? e.calleeFile : e.callerFile;
+            const count = e.rawCount ?? Math.round(e.weight ?? 0);
+            lines.push(`  - Evolutionary: ${otherFile} — ${count} co-changes`);
+            if (e.latestCommitDate) {
+              const latestAge = this.relativeAge(e.latestCommitDate);
+              const latestHash = e.latestCommitHash ? e.latestCommitHash.substring(0, 8) : '';
+              const freshness = this.freshnessLabel(e.latestCommitDate);
+              lines.push(`    LAST MODIFIED: ${latestAge} (${latestHash}) → "${freshness}"`);
+            }
+            if (e.earliestCommitDate) {
+              const earliestAge = this.relativeAge(e.earliestCommitDate);
+              const earliestHash = e.earliestCommitHash ? e.earliestCommitHash.substring(0, 8) : '';
+              const legacyLabel = this.freshnessLabel(e.earliestCommitDate);
+              lines.push(`    LEGACY PEAK: ${earliestAge} (${earliestHash}) → "${legacyLabel}"`);
+            }
+          }
         }
         structParts.push(lines.join('\n'));
       }
@@ -1001,6 +1009,16 @@ export class RAGEngine {
       const c = result.chunk;
       return 80 + c.title.length + Math.min(c.description.length, 500) + c.linkedIssues.length;
     }
+  }
+
+  /** Classify an ISO date as Modern (<6 months), Recent (6–18 months), or Stale (>18 months). */
+  private freshnessLabel(isoDate: string): string {
+    const then = new Date(isoDate).getTime();
+    if (isNaN(then)) return 'Unknown';
+    const days = Math.floor((Date.now() - then) / (1000 * 60 * 60 * 24));
+    if (days < 180) return 'Modern';
+    if (days < 540) return 'Recent';
+    return 'Stale';
   }
 
   /** Convert an ISO date string to a human-readable relative age. */

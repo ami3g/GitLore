@@ -102,10 +102,16 @@ export interface CallEdge {
   edgeType?: 'call' | 'co-change';
   /** For co-change edges: recency-decayed coupling score (higher = stronger + more recent) */
   weight?: number;
+  /** For co-change edges: raw number of co-occurring commits (before decay) */
+  rawCount?: number;
   /** For co-change edges: hash of the most recent commit that co-changed these files */
   latestCommitHash?: string;
   /** For co-change edges: ISO date of the most recent co-change commit */
   latestCommitDate?: string;
+  /** For co-change edges: hash of the earliest commit that co-changed these files */
+  earliestCommitHash?: string;
+  /** For co-change edges: ISO date of the earliest co-change commit */
+  earliestCommitDate?: string;
 }
 
 export interface IndexStatus {

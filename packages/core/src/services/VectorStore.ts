@@ -646,8 +646,11 @@ export class VectorStore {
       line: e.line,
       edgeType: e.edgeType ?? 'call',
       weight: e.weight ?? 0,
+      rawCount: e.rawCount ?? 0,
       latestCommitHash: e.latestCommitHash ?? '',
       latestCommitDate: e.latestCommitDate ?? '',
+      earliestCommitHash: e.earliestCommitHash ?? '',
+      earliestCommitDate: e.earliestCommitDate ?? '',
     }));
 
     try { await db.dropTable(CALL_GRAPH_TABLE); } catch { /* OK */ }
@@ -674,8 +677,11 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        rawCount: r.rawCount || undefined,
         latestCommitHash: r.latestCommitHash || undefined,
         latestCommitDate: r.latestCommitDate || undefined,
+        earliestCommitHash: r.earliestCommitHash || undefined,
+        earliestCommitDate: r.earliestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -702,8 +708,11 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        rawCount: r.rawCount || undefined,
         latestCommitHash: r.latestCommitHash || undefined,
         latestCommitDate: r.latestCommitDate || undefined,
+        earliestCommitHash: r.earliestCommitHash || undefined,
+        earliestCommitDate: r.earliestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -727,8 +736,11 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        rawCount: r.rawCount || undefined,
         latestCommitHash: r.latestCommitHash || undefined,
         latestCommitDate: r.latestCommitDate || undefined,
+        earliestCommitHash: r.earliestCommitHash || undefined,
+        earliestCommitDate: r.earliestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -757,8 +769,11 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType,
         weight: r.weight ?? 0,
+        rawCount: r.rawCount || undefined,
         latestCommitHash: r.latestCommitHash || undefined,
         latestCommitDate: r.latestCommitDate || undefined,
+        earliestCommitHash: r.earliestCommitHash || undefined,
+        earliestCommitDate: r.earliestCommitDate || undefined,
       }));
     } catch {
       return [];
