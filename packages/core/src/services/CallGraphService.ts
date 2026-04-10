@@ -216,53 +216,98 @@ export class CallGraphService {
   /**
    * Compute co-change (evolutionary coupling) edges from commit history.
    * Two files are coupled if they frequently appear in the same commits.
+   *
+   * Uses exponential recency decay: recent co-changes score higher than old ones.
+   * A commit from today contributes ~1.0; a commit from 2 years ago contributes ~0.13.
+   * This ensures modern refactoring patterns naturally float to the top.
+   *
    * Thresholds: each file must appear in ≥3 commits, pair must co-occur ≥3 times,
    * and co-change rate must exceed 50% relative to the less-frequent file.
    */
-  computeCoChangeEdges(commitFileGroups: Map<string, string[]>): CallEdge[] {
+  computeCoChangeEdges(
+    commitFileGroups: Map<string, { files: string[]; date: string }>
+  ): CallEdge[] {
     const MIN_FILE_COMMITS = 3;
     const MIN_CO_OCCURRENCES = 3;
     const MIN_CO_CHANGE_RATE = 0.5;
-    const MAX_EDGES = 500; // cap to avoid blowing up the call_graph table
+    const MAX_EDGES = 500;
+    // Half-life in days: a commit from this many days ago has half the weight of today's
+    const HALF_LIFE_DAYS = 365;
+    const DECAY_LAMBDA = Math.LN2 / HALF_LIFE_DAYS;
+
+    const now = Date.now();
 
     // Count how many commits each file appears in
     const fileCommitCount = new Map<string, number>();
-    for (const files of commitFileGroups.values()) {
+    for (const { files } of commitFileGroups.values()) {
       const unique = new Set(files);
       for (const f of unique) {
         fileCommitCount.set(f, (fileCommitCount.get(f) ?? 0) + 1);
       }
     }
 
-    // Count pairwise co-occurrences (only for files meeting the minimum)
-    const pairCount = new Map<string, number>();
-    for (const files of commitFileGroups.values()) {
+    // Track pairwise co-occurrence: decayed weight sum + raw count + most-recent commit
+    interface PairInfo {
+      decayedWeight: number;
+      rawCount: number;
+      latestHash: string;
+      latestDate: string;
+      latestTimestamp: number;
+    }
+    const pairInfo = new Map<string, PairInfo>();
+
+    for (const [hash, { files, date }] of commitFileGroups) {
+      const commitTime = new Date(date).getTime();
+      const ageDays = Math.max(0, (now - commitTime) / (1000 * 60 * 60 * 24));
+      const decayFactor = Math.exp(-DECAY_LAMBDA * ageDays);
+
       const qualified = [...new Set(files)].filter(
         (f) => (fileCommitCount.get(f) ?? 0) >= MIN_FILE_COMMITS
       );
-      // Pairwise combinations (sorted key to avoid duplicates)
+
       for (let i = 0; i < qualified.length; i++) {
         for (let j = i + 1; j < qualified.length; j++) {
           const key = qualified[i] < qualified[j]
             ? `${qualified[i]}|||${qualified[j]}`
             : `${qualified[j]}|||${qualified[i]}`;
-          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+
+          const existing = pairInfo.get(key);
+          if (existing) {
+            existing.decayedWeight += decayFactor;
+            existing.rawCount += 1;
+            if (commitTime > existing.latestTimestamp) {
+              existing.latestHash = hash;
+              existing.latestDate = date;
+              existing.latestTimestamp = commitTime;
+            }
+          } else {
+            pairInfo.set(key, {
+              decayedWeight: decayFactor,
+              rawCount: 1,
+              latestHash: hash,
+              latestDate: date,
+              latestTimestamp: commitTime,
+            });
+          }
         }
       }
     }
 
     // Filter pairs by co-occurrence threshold and rate
     const edges: CallEdge[] = [];
-    for (const [key, count] of pairCount) {
-      if (count < MIN_CO_OCCURRENCES) continue;
+    for (const [key, info] of pairInfo) {
+      if (info.rawCount < MIN_CO_OCCURRENCES) continue;
 
       const [fileA, fileB] = key.split('|||');
       const countA = fileCommitCount.get(fileA) ?? 0;
       const countB = fileCommitCount.get(fileB) ?? 0;
       const minCount = Math.min(countA, countB);
-      const rate = count / minCount;
+      const rate = info.rawCount / minCount;
 
       if (rate < MIN_CO_CHANGE_RATE) continue;
+
+      // Round to 2 decimal places for readability in diagnostics
+      const weight = Math.round(info.decayedWeight * 100) / 100;
 
       edges.push({
         callerFile: fileA,
@@ -271,11 +316,13 @@ export class CallGraphService {
         calleeName: '<co-change>',
         line: 0,
         edgeType: 'co-change',
-        weight: count,
+        weight,
+        latestCommitHash: info.latestHash,
+        latestCommitDate: info.latestDate,
       });
     }
 
-    // Sort by weight descending and cap
+    // Sort by decayed weight descending (recent+frequent pairs first) and cap
     edges.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
     return edges.slice(0, MAX_EDGES);
   }

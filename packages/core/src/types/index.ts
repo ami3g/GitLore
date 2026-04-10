@@ -100,8 +100,12 @@ export interface CallEdge {
   line: number;
   /** 'call' for static call graph edges, 'co-change' for evolutionary coupling */
   edgeType?: 'call' | 'co-change';
-  /** For co-change edges: number of commits where both files changed together */
+  /** For co-change edges: recency-decayed coupling score (higher = stronger + more recent) */
   weight?: number;
+  /** For co-change edges: hash of the most recent commit that co-changed these files */
+  latestCommitHash?: string;
+  /** For co-change edges: ISO date of the most recent co-change commit */
+  latestCommitDate?: string;
 }
 
 export interface IndexStatus {

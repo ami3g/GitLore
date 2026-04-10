@@ -621,12 +621,16 @@ export class RAGEngine {
         }
         if (coChangeEdges.length > 0) {
           // Only surface top 5 highest-weight co-change edges to avoid prompt clutter
+          // Include relative age so the LLM can distinguish modern patterns from legacy
           const coChanged = coChangeEdges
             .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
             .slice(0, 5)
             .map((e) => {
               const otherFile = e.callerFile === fp ? e.calleeFile : e.callerFile;
-              return `${otherFile} (${e.weight} commits)`;
+              const age = e.latestCommitDate ? this.relativeAge(e.latestCommitDate) : '';
+              const hashShort = e.latestCommitHash ? e.latestCommitHash.substring(0, 8) : '';
+              const detail = age && hashShort ? ` — last: ${hashShort} (${age})` : '';
+              return `${otherFile} (score ${e.weight}${detail})`;
             });
           lines.push(`  Frequently changed with: ${coChanged.join(', ')}`);
         }
@@ -997,5 +1001,20 @@ export class RAGEngine {
       const c = result.chunk;
       return 80 + c.title.length + Math.min(c.description.length, 500) + c.linkedIssues.length;
     }
+  }
+
+  /** Convert an ISO date string to a human-readable relative age. */
+  private relativeAge(isoDate: string): string {
+    const then = new Date(isoDate).getTime();
+    if (isNaN(then)) return '';
+    const diffMs = Date.now() - then;
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (days < 1) return 'today';
+    if (days === 1) return 'yesterday';
+    if (days < 7) return `${days} days ago`;
+    if (days < 30) return `${Math.floor(days / 7)} weeks ago`;
+    if (days < 365) return `${Math.floor(days / 30)} months ago`;
+    const years = Math.floor(days / 365);
+    return years === 1 ? '1 year ago' : `${years} years ago`;
   }
 }

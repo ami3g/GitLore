@@ -646,6 +646,8 @@ export class VectorStore {
       line: e.line,
       edgeType: e.edgeType ?? 'call',
       weight: e.weight ?? 0,
+      latestCommitHash: e.latestCommitHash ?? '',
+      latestCommitDate: e.latestCommitDate ?? '',
     }));
 
     try { await db.dropTable(CALL_GRAPH_TABLE); } catch { /* OK */ }
@@ -672,6 +674,8 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        latestCommitHash: r.latestCommitHash || undefined,
+        latestCommitDate: r.latestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -698,6 +702,8 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        latestCommitHash: r.latestCommitHash || undefined,
+        latestCommitDate: r.latestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -721,6 +727,8 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType ?? 'call',
         weight: r.weight ?? 0,
+        latestCommitHash: r.latestCommitHash || undefined,
+        latestCommitDate: r.latestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -749,6 +757,8 @@ export class VectorStore {
         line: r.line,
         edgeType: r.edgeType,
         weight: r.weight ?? 0,
+        latestCommitHash: r.latestCommitHash || undefined,
+        latestCommitDate: r.latestCommitDate || undefined,
       }));
     } catch {
       return [];
@@ -756,25 +766,26 @@ export class VectorStore {
   }
 
   /**
-   * Get all unique commit hashes and their associated file paths from the commits table.
+   * Get all unique commit hashes with their associated file paths and dates.
    * Used to compute co-change / evolutionary coupling between files.
    */
-  async getCommitFileGroups(): Promise<Map<string, string[]>> {
+  async getCommitFileGroups(): Promise<Map<string, { files: string[]; date: string }>> {
     const table = await this.getCommitTable();
     if (!table) return new Map();
 
     try {
       const rows: Record<string, unknown>[] = await table
         .query()
-        .select(['hash', 'filePath'])
+        .select(['hash', 'filePath', 'date'])
         .toArray();
 
-      const groups = new Map<string, string[]>();
+      const groups = new Map<string, { files: string[]; date: string }>();
       for (const row of rows) {
         const hash = row['hash'] as string;
         const fp = row['filePath'] as string;
-        if (!groups.has(hash)) groups.set(hash, []);
-        groups.get(hash)!.push(fp);
+        const date = row['date'] as string;
+        if (!groups.has(hash)) groups.set(hash, { files: [], date });
+        groups.get(hash)!.files.push(fp);
       }
       return groups;
     } catch {
