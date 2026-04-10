@@ -546,14 +546,12 @@ export class VectorStore {
     const table = await this.getCodeTable();
     if (!table || filePaths.length === 0) return [];
 
-    const conditions = filePaths
-      .map((fp) => `"filePath" = '${fp.replace(/'/g, "''")}'`)
-      .join(' OR ');
-
-    const rows: Record<string, unknown>[] = await table
-      .query()
-      .where(conditions)
-      .toArray();
+    // LanceDB DataFusion WHERE with camelCase column names is unreliable
+    // (double-quoted silently returns 0, unquoted lowercases the name).
+    // Use select + JS filter instead — fast enough for code tables (<10k rows).
+    const wantedSet = new Set(filePaths);
+    const allRows: Record<string, unknown>[] = await table.query().toArray();
+    const rows = allRows.filter((r) => wantedSet.has(r['filePath'] as string));
 
     return rows
       .map((row) => {

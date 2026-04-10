@@ -540,8 +540,7 @@ export class RAGEngine {
       }
     }
 
-    console.error(`[RAGEngine] Step 4: topCodeFiles from candidates: [${topCodeFiles.join(', ')}]`);
-    console.error(`[RAGEngine] Step 3c: querySymbols=[${querySymbols.join(',')}] mentionedFiles=[${mentionedFiles.join(',')}]`);
+
 
     // ─── 4b. Anchor file persistence for trace / implementation queries ───
     // Central files (highest call-graph connectivity) should always have their
@@ -578,13 +577,8 @@ export class RAGEngine {
     // because the mentioned file may have zero chunks in vector results.
     if (mentionedFiles.length > 0) {
       const allIndexedPaths = await store.getAllUniqueFilePaths();
-      console.error(`[RAGEngine] Step 4c: ${allIndexedPaths.length} indexed paths, resolving ${mentionedFiles.length} mentioned files`);
-      console.error(`[RAGEngine] Step 4c sample paths: [${allIndexedPaths.slice(0, 8).join(', ')}]`);
-      const routerHits = allIndexedPaths.filter(p => p.includes('router'));
-      if (routerHits.length) console.error(`[RAGEngine] Step 4c router paths: [${routerHits.join(', ')}]`);
       for (const mf of mentionedFiles) {
         const match = allIndexedPaths.find(kp => kp === mf || kp.endsWith('/' + mf) || kp.endsWith('\\' + mf));
-        console.error(`[RAGEngine] Step 4c: "${mf}" → ${match ? `matched "${match}"` : 'NO MATCH'} (seenFiles.has=${match ? seenFiles.has(match) : 'N/A'})`);
         if (match && !seenFiles.has(match)) {
           seenFiles.add(match);
           topCodeFiles.push(match);
@@ -592,23 +586,19 @@ export class RAGEngine {
       }
     }
 
-    console.error(`[RAGEngine] Step 4 final: topCodeFiles=[${topCodeFiles.join(', ')}] (${topCodeFiles.length} files)`);
-
     // Fetch all chunks for those files and build smart-expanded content
     const expandedFiles = new Map<string, string>();
     if (topCodeFiles.length > 0) {
       try {
       const allFileChunks = await store.getCodeChunksForFiles(topCodeFiles);
-      console.error(`[RAGEngine] Step 4 expansion: getCodeChunksForFiles returned ${allFileChunks.length} chunks for ${topCodeFiles.length} files`);
       for (const fp of topCodeFiles) {
         const fileChunks = allFileChunks
           .filter((c) => c.filePath === fp && !c.isSummary)
           .sort((a, b) => a.startLine - b.startLine);
         if (fileChunks.length === 0) {
-          console.error(`[RAGEngine] Step 4 expansion: SKIP "${fp}" — 0 non-summary chunks (total for file: ${allFileChunks.filter(c => c.filePath === fp).length})`);
           continue;
         }
-        console.error(`[RAGEngine] Step 4 expansion: "${fp}" — ${fileChunks.length} chunks, functions: [${fileChunks.flatMap(c => c.functions || []).join(',')}]`);
+
 
         // ─── Contextual Expansion ───
         // For trace queries: if a chunk contains a queried symbol (e.g. next) as a
@@ -719,10 +709,10 @@ export class RAGEngine {
           combined = combined.slice(0, MAX_EXPAND_CHARS) + '\n... [file truncated]';
         }
         expandedFiles.set(fp, combined);
-        console.error(`[RAGEngine] Step 4 expansion: ✓ "${fp}" expanded (${Math.round(combined.length / 1000)}K chars, ${contextExpandedKeys.size} contextual chunks)`);
+
       }
       } catch (err) {
-        console.error(`[RAGEngine] Step 4 expansion: ERROR — ${err instanceof Error ? err.message : String(err)}`);
+
       }
     }
 
