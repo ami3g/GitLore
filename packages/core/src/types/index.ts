@@ -98,6 +98,10 @@ export interface CallEdge {
   calleeFile: string;
   calleeName: string;
   line: number;
+  /** 'call' for static call graph edges, 'co-change' for evolutionary coupling */
+  edgeType?: 'call' | 'co-change';
+  /** For co-change edges: number of commits where both files changed together */
+  weight?: number;
 }
 
 export interface IndexStatus {

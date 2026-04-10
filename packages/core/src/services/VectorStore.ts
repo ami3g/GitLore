@@ -644,6 +644,8 @@ export class VectorStore {
       calleeFile: e.calleeFile,
       calleeName: e.calleeName,
       line: e.line,
+      edgeType: e.edgeType ?? 'call',
+      weight: e.weight ?? 0,
     }));
 
     try { await db.dropTable(CALL_GRAPH_TABLE); } catch { /* OK */ }
@@ -668,6 +670,8 @@ export class VectorStore {
         calleeFile: r.calleeFile,
         calleeName: r.calleeName,
         line: r.line,
+        edgeType: r.edgeType ?? 'call',
+        weight: r.weight ?? 0,
       }));
     } catch {
       return [];
@@ -692,6 +696,8 @@ export class VectorStore {
         calleeFile: r.calleeFile,
         calleeName: r.calleeName,
         line: r.line,
+        edgeType: r.edgeType ?? 'call',
+        weight: r.weight ?? 0,
       }));
     } catch {
       return [];
@@ -713,9 +719,66 @@ export class VectorStore {
         calleeFile: r.calleeFile,
         calleeName: r.calleeName,
         line: r.line,
+        edgeType: r.edgeType ?? 'call',
+        weight: r.weight ?? 0,
       }));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Query co-change edges for a given file.
+   * Returns files that frequently change together with the target file in commits.
+   */
+  async queryCoChangeEdges(filePath: string): Promise<CallEdge[]> {
+    const table = await this.getCallGraphTable();
+    if (!table) return [];
+
+    try {
+      const escaped = filePath.replace(/'/g, "''");
+      const results = await table
+        .query()
+        .where(`"edgeType" = 'co-change' AND ("callerFile" = '${escaped}' OR "calleeFile" = '${escaped}')`)
+        .toArray();
+      return results.map((r: any) => ({
+        callerFile: r.callerFile,
+        callerName: r.callerName,
+        calleeFile: r.calleeFile,
+        calleeName: r.calleeName,
+        line: r.line,
+        edgeType: r.edgeType,
+        weight: r.weight ?? 0,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get all unique commit hashes and their associated file paths from the commits table.
+   * Used to compute co-change / evolutionary coupling between files.
+   */
+  async getCommitFileGroups(): Promise<Map<string, string[]>> {
+    const table = await this.getCommitTable();
+    if (!table) return new Map();
+
+    try {
+      const rows: Record<string, unknown>[] = await table
+        .query()
+        .select(['hash', 'filePath'])
+        .toArray();
+
+      const groups = new Map<string, string[]>();
+      for (const row of rows) {
+        const hash = row['hash'] as string;
+        const fp = row['filePath'] as string;
+        if (!groups.has(hash)) groups.set(hash, []);
+        groups.get(hash)!.push(fp);
+      }
+      return groups;
+    } catch {
+      return new Map();
     }
   }
 

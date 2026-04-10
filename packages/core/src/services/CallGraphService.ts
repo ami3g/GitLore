@@ -213,6 +213,73 @@ export class CallGraphService {
     return null;
   }
 
+  /**
+   * Compute co-change (evolutionary coupling) edges from commit history.
+   * Two files are coupled if they frequently appear in the same commits.
+   * Thresholds: each file must appear in ≥3 commits, pair must co-occur ≥3 times,
+   * and co-change rate must exceed 50% relative to the less-frequent file.
+   */
+  computeCoChangeEdges(commitFileGroups: Map<string, string[]>): CallEdge[] {
+    const MIN_FILE_COMMITS = 3;
+    const MIN_CO_OCCURRENCES = 3;
+    const MIN_CO_CHANGE_RATE = 0.5;
+    const MAX_EDGES = 500; // cap to avoid blowing up the call_graph table
+
+    // Count how many commits each file appears in
+    const fileCommitCount = new Map<string, number>();
+    for (const files of commitFileGroups.values()) {
+      const unique = new Set(files);
+      for (const f of unique) {
+        fileCommitCount.set(f, (fileCommitCount.get(f) ?? 0) + 1);
+      }
+    }
+
+    // Count pairwise co-occurrences (only for files meeting the minimum)
+    const pairCount = new Map<string, number>();
+    for (const files of commitFileGroups.values()) {
+      const qualified = [...new Set(files)].filter(
+        (f) => (fileCommitCount.get(f) ?? 0) >= MIN_FILE_COMMITS
+      );
+      // Pairwise combinations (sorted key to avoid duplicates)
+      for (let i = 0; i < qualified.length; i++) {
+        for (let j = i + 1; j < qualified.length; j++) {
+          const key = qualified[i] < qualified[j]
+            ? `${qualified[i]}|||${qualified[j]}`
+            : `${qualified[j]}|||${qualified[i]}`;
+          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        }
+      }
+    }
+
+    // Filter pairs by co-occurrence threshold and rate
+    const edges: CallEdge[] = [];
+    for (const [key, count] of pairCount) {
+      if (count < MIN_CO_OCCURRENCES) continue;
+
+      const [fileA, fileB] = key.split('|||');
+      const countA = fileCommitCount.get(fileA) ?? 0;
+      const countB = fileCommitCount.get(fileB) ?? 0;
+      const minCount = Math.min(countA, countB);
+      const rate = count / minCount;
+
+      if (rate < MIN_CO_CHANGE_RATE) continue;
+
+      edges.push({
+        callerFile: fileA,
+        callerName: '<co-change>',
+        calleeFile: fileB,
+        calleeName: '<co-change>',
+        line: 0,
+        edgeType: 'co-change',
+        weight: count,
+      });
+    }
+
+    // Sort by weight descending and cap
+    edges.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    return edges.slice(0, MAX_EDGES);
+  }
+
   /** Normalize a path by resolving . and .. segments */
   private normalizePath(p: string): string {
     const parts = p.split('/');

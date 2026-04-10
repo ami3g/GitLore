@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as os from 'os';
 import * as fs from 'fs';
 import { GitProcessor, type ProgressCallback } from './GitProcessor';
 import { CodeIndexer } from './CodeIndexer';
@@ -6,10 +7,12 @@ import { GitHubService, type RepoScale } from './GitHubService';
 import { classifyIntent, rerank } from './IntentRouter';
 import { EmbeddingService } from './EmbeddingService';
 import { VectorStore } from './VectorStore';
+import { ASTService } from './ASTService';
+import { CallGraphService } from './CallGraphService';
 import { OpenAIProvider } from './llm/OpenAIProvider';
 import { OllamaProvider } from './llm/OllamaProvider';
 import type { LLMProvider, StreamCallback } from './llm/LLMProvider';
-import type { IndexStatus, LLMMessage, SearchResult } from '../types';
+import type { IndexStatus, LLMMessage, SearchResult, CallEdge } from '../types';
 import type { GitLoreConfig } from '../config';
 
 const SYSTEM_PROMPT = `You are GitLore, a specialized Repository Historian with access to the current codebase, the full git commit history, and pull request / issue context.
@@ -18,7 +21,7 @@ DATA TYPES YOU RECEIVE:
 • [COMMIT] — Historical git commits with diffs, authors, dates. Use for “when”, “why”, and “who” questions.
 • [CODE] — Current source file snippets with file paths, languages, and line numbers. Use for “what does this code do”, “where is X defined”, and architecture questions.
 • [CODE – FULL FILE] — Expanded full-file context for top-ranked code results. Prefer these over individual chunks when available.
-• [PR] — Pull requests and linked issues. Use for feature context, review decisions, and linking changes to higher-level goals.• [STRUCTURE] — Call graph and symbol information (defines, imports, callers, callees) for top-ranked files. Use to explain how functions connect and data flows through the codebase.• Project File Structure — A directory tree of all indexed source files. Use this to identify features, modules, and capabilities even if their code was not directly retrieved.
+• [PR] — Pull requests and linked issues. Use for feature context, review decisions, and linking changes to higher-level goals.• [STRUCTURE] — Call graph, symbol information (defines, imports, callers, callees), and co-change coupling (files that frequently change together in commits) for top-ranked files. Use to explain how functions connect, how data flows through the codebase, and which files are evolutionarily coupled even without direct imports.• Project File Structure — A directory tree of all indexed source files. Use this to identify features, modules, and capabilities even if their code was not directly retrieved.
 
 ANSWER RUBRIC — Evaluate your response against these criteria before finalizing:
 1. **Evidence-grounded**: Every claim must trace to a specific retrieved snippet. If you cannot find evidence, state "The retrieved context does not cover X" instead of guessing.
@@ -222,6 +225,9 @@ export class RAGEngine {
       ? `Code index complete — ${changedFiles.length} files, ${chunks.length} chunks (${summaryCount} summaries)`
       : `Code index complete — ${changedFiles.length} files, ${chunks.length} chunks`;
     onProgress?.(label, 1, 1);
+
+    // ─── Build Call Graph (static + co-change edges) ───
+    await this.buildCallGraph(repoPath, codeIndexer, store, onProgress);
 
     return { changedFiles: changedFiles.length, totalChunks: chunks.length };
   }
@@ -441,15 +447,21 @@ export class RAGEngine {
       allCandidates.sort((a, b) => a.score - b.score);
     }
 
-    // ─── 4. Small-to-Big expansion ───
-    // For the top N unique code files, fetch ALL their chunks to give the LLM
-    // full file context instead of isolated 256-line windows.
-    // How many files to expand depends on intent:
-    //   overview → expand top 3 files (README, main entry, etc.)
-    //   implementation/general → expand top 3 files (see the whole module)
-    //   historical/debugging → expand top 1 file (focus on the specific area)
+    // ─── 4. Smart file expansion (AST-aware) ───
+    // Instead of hard-truncating at N chars, we use chunk metadata:
+    //   - Chunks that were direct vector search hits → include FULL content
+    //   - Chunks that weren't hits → collapse to a 1-line skeleton with symbol names
+    // This means the LLM sees the whole file structure but only the relevant details.
     const EXPAND_FILES = (weights.intent === 'historical' || weights.intent === 'debugging') ? 3 : 5;
-    const MAX_EXPAND_CHARS = 6000; // cap per expanded file
+    const MAX_EXPAND_CHARS = 12000; // safety cap for truly massive files (after collapsing)
+
+    // Track which chunks were actually hit by vector search for each file
+    const hitChunkKeys = new Set<string>();
+    for (const r of allCandidates) {
+      if (r.type === 'code') {
+        hitChunkKeys.add(`${r.chunk.filePath}:${r.chunk.startLine}`);
+      }
+    }
 
     // Find unique file paths from top code results
     const topCodeFiles: string[] = [];
@@ -462,7 +474,7 @@ export class RAGEngine {
       }
     }
 
-    // Fetch all chunks for those files and build expanded content
+    // Fetch all chunks for those files and build smart-expanded content
     const expandedFiles = new Map<string, string>();
     if (topCodeFiles.length > 0) {
       const allFileChunks = await store.getCodeChunksForFiles(topCodeFiles);
@@ -472,22 +484,32 @@ export class RAGEngine {
           .sort((a, b) => a.startLine - b.startLine);
         if (fileChunks.length === 0) continue;
 
-        // Reconstruct file content from ordered chunks (deduplicate overlapping lines)
-        let combined = fileChunks[0].content;
-        for (let i = 1; i < fileChunks.length; i++) {
-          const prev = fileChunks[i - 1];
-          const curr = fileChunks[i];
-          // If chunks overlap, skip the overlapping portion
-          if (curr.startLine <= prev.endLine) {
-            const overlapLines = prev.endLine - curr.startLine + 1;
-            const lines = curr.content.split('\n');
-            combined += '\n' + lines.slice(overlapLines).join('\n');
+        const parts: string[] = [];
+        for (const chunk of fileChunks) {
+          const key = `${chunk.filePath}:${chunk.startLine}`;
+          const isHit = hitChunkKeys.has(key);
+
+          if (isHit) {
+            // Hit chunk → full content
+            parts.push(chunk.content);
           } else {
-            combined += '\n' + curr.content;
+            // Non-hit chunk → collapsed skeleton with symbol names
+            const symbols: string[] = [];
+            if (chunk.functions?.length) symbols.push(...chunk.functions.map(f => `fn ${f}()`));
+            if (chunk.classes?.length) symbols.push(...chunk.classes.map(c => `class ${c}`));
+            if (chunk.imports?.length) symbols.push(`imports: ${chunk.imports.join(', ')}`);
+            if (chunk.exports?.length) symbols.push(`exports: ${chunk.exports.join(', ')}`);
+
+            if (symbols.length > 0) {
+              parts.push(`// --- Lines ${chunk.startLine}-${chunk.endLine}: ${symbols.join(' | ')} ---`);
+            } else {
+              parts.push(`// --- Lines ${chunk.startLine}-${chunk.endLine} (${chunk.endLine - chunk.startLine + 1} lines) ---`);
+            }
           }
         }
 
-        // Truncate if too long
+        let combined = parts.join('\n');
+        // Safety cap (after collapsing, should rarely trigger)
         if (combined.length > MAX_EXPAND_CHARS) {
           combined = combined.slice(0, MAX_EXPAND_CHARS) + '\n... [file truncated]';
         }
@@ -546,23 +568,39 @@ export class RAGEngine {
     }
 
     // ─── 7. Structural context from call graph ───
-    // For expanded files, show what they define, import, and connect to.
+    // For expanded files, show what they define, import, connect to, and co-change with.
     let structuralContext: string | undefined;
     if (expandedFiles.size > 0) {
       const structParts: string[] = [];
       for (const fp of expandedFiles.keys()) {
         const callerEdges = await store.queryCallGraphByCaller(fp);
         const calleeEdges = await store.queryCallGraphByCallee(fp);
-        if (callerEdges.length === 0 && calleeEdges.length === 0) continue;
+        const coChangeEdges = await store.queryCoChangeEdges(fp);
+
+        // Separate static call edges from co-change in caller/callee results
+        const staticCallerEdges = callerEdges.filter((e) => e.edgeType !== 'co-change');
+        const staticCalleeEdges = calleeEdges.filter((e) => e.edgeType !== 'co-change');
+
+        if (staticCallerEdges.length === 0 && staticCalleeEdges.length === 0 && coChangeEdges.length === 0) continue;
 
         const lines: string[] = [`[STRUCTURE] File: ${fp}`];
-        if (callerEdges.length > 0) {
-          const callees = [...new Set(callerEdges.map((e) => `${e.calleeName} (${e.calleeFile})`))];
+        if (staticCallerEdges.length > 0) {
+          const callees = [...new Set(staticCallerEdges.map((e) => `${e.calleeName} (${e.calleeFile})`))];
           lines.push(`  Calls: ${callees.slice(0, 15).join(', ')}`);
         }
-        if (calleeEdges.length > 0) {
-          const callers = [...new Set(calleeEdges.map((e) => `${e.callerName} (${e.callerFile})`))];
+        if (staticCalleeEdges.length > 0) {
+          const callers = [...new Set(staticCalleeEdges.map((e) => `${e.callerName} (${e.callerFile})`))];
           lines.push(`  Called by: ${callers.slice(0, 15).join(', ')}`);
+        }
+        if (coChangeEdges.length > 0) {
+          // Show files that frequently change together, sorted by weight (co-occurrence count)
+          const coChanged = coChangeEdges
+            .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+            .map((e) => {
+              const otherFile = e.callerFile === fp ? e.calleeFile : e.callerFile;
+              return `${otherFile} (${e.weight} commits)`;
+            });
+          lines.push(`  Frequently changed with: ${coChanged.slice(0, 10).join(', ')}`);
         }
         structParts.push(lines.join('\n'));
       }
@@ -575,6 +613,83 @@ export class RAGEngine {
 
     const provider = this.getLLMProvider();
     return provider.sendMessage(messages, onChunk);
+  }
+
+  // ─── Call Graph Building ───
+
+  /**
+   * Build static call graph (from AST analysis) + co-change edges (from commit history)
+   * and persist them into the call_graph table.
+   */
+  private async buildCallGraph(
+    repoPath: string,
+    codeIndexer: CodeIndexer,
+    store: VectorStore,
+    onProgress?: ProgressCallback
+  ): Promise<void> {
+    try {
+      onProgress?.('Building call graph (AST analysis)', 0, 0);
+
+      // 1. Initialize AST service
+      const grammarDir = path.join(os.homedir(), '.gitlore', 'grammars');
+      const ast = new ASTService(grammarDir);
+      await ast.init();
+
+      // 2. Read all code files for parsing
+      const files = await codeIndexer.listFiles();
+      const LANG_MAP: Record<string, string> = {
+        '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript', '.jsx': 'javascript',
+        '.py': 'python', '.go': 'go', '.rs': 'rust', '.java': 'java',
+        '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp',
+      };
+
+      const fileContents: { filePath: string; content: string; language: string }[] = [];
+      for (const relPath of files) {
+        const absPath = path.join(repoPath, relPath);
+        try {
+          const content = fs.readFileSync(absPath, 'utf-8');
+          const ext = path.extname(relPath).toLowerCase();
+          const language = LANG_MAP[ext];
+          if (language) {
+            fileContents.push({ filePath: relPath, content, language });
+          }
+        } catch {
+          // Skip unreadable files
+        }
+      }
+
+      onProgress?.(`Parsing ${fileContents.length} files for AST`, 0, fileContents.length);
+      const allSymbols = await ast.parseFiles(fileContents);
+      ast.dispose();
+
+      // 3. Build static call graph edges
+      const cg = new CallGraphService();
+      const staticEdges = cg.buildGraph(allSymbols);
+      onProgress?.(`Static call graph: ${staticEdges.length} edges`, 0, 0);
+
+      // 4. Compute co-change edges from commit history
+      let coChangeEdges: CallEdge[] = [];
+      try {
+        const commitFileGroups = await store.getCommitFileGroups();
+        if (commitFileGroups.size > 0) {
+          coChangeEdges = cg.computeCoChangeEdges(commitFileGroups);
+          onProgress?.(`Co-change edges: ${coChangeEdges.length} evolutionary couplings`, 0, 0);
+        }
+      } catch {
+        // Co-change is optional — commit table might not exist yet
+      }
+
+      // 5. Merge and persist
+      const allEdges = [...staticEdges, ...coChangeEdges];
+      if (allEdges.length > 0) {
+        await store.upsertCallGraph(allEdges);
+        onProgress?.(`Call graph stored: ${staticEdges.length} static + ${coChangeEdges.length} co-change edges`, 1, 1);
+      }
+    } catch (err) {
+      // Call graph building is supplementary — don't fail the indexing
+      console.error('[RAGEngine] Call graph building failed:', err);
+      onProgress?.('Call graph building skipped (non-fatal)', 0, 0);
+    }
   }
 
   // ─── Status & Cleanup ───
