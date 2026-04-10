@@ -43,8 +43,9 @@ CONVERSATION CONTEXT: Use the provided conversation history for continuity, but 
 
 TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
 
-// Rough character budget — ~4 chars per token, leave room for the response
-const MAX_PROMPT_CHARS = 60000;
+// Rough character budget — modern LLMs (GPT-4o, Claude 3.5) handle 128K+ tokens.
+// We target ~30K tokens of context (~120K chars) leaving ample room for the response.
+const MAX_PROMPT_CHARS = 120000;
 
 export class RAGEngine {
   private config: GitLoreConfig;
@@ -522,7 +523,9 @@ export class RAGEngine {
     let usedChars = 0;
     const merged: SearchResult[] = [];
     const usedIndices = new Set<number>();
-    const expandedFilesUsed = new Set<string>();
+
+    // Track which files have expanded (full-file) content — only skip individual chunks for THOSE files
+    const expandedFileSet = new Set(expandedFiles.keys());
 
     // Intent-aware seed: code first for overview/impl/general, commits first for hist/debug
     const commitFirst = weights.intent === 'historical' || weights.intent === 'debugging';
@@ -537,23 +540,22 @@ export class RAGEngine {
         merged.push(result);
         usedChars += charCost;
         usedIndices.add(seedIdx);
-        if (result.type === 'code') expandedFilesUsed.add(result.chunk.filePath);
       }
     }
 
-    // Fill greedily; skip duplicate file chunks if we already have the expanded version
+    // Fill greedily; skip individual chunks ONLY for files that have expanded content.
+    // Allow multiple chunks from the same non-expanded file (different functions/symbols).
     for (let i = 0; i < allCandidates.length; i++) {
       if (usedIndices.has(i)) continue;
       const result = allCandidates[i];
 
-      // If this code chunk's file was expanded, skip individual chunks for it
-      if (result.type === 'code' && expandedFilesUsed.has(result.chunk.filePath)) continue;
+      // If this code chunk's file was expanded to full-file content, skip the duplicate chunk
+      if (result.type === 'code' && expandedFileSet.has(result.chunk.filePath)) continue;
 
       const charCost = this.estimateSnippetChars(result);
       if (usedChars + charCost > snippetBudget && merged.length > 0) break;
       merged.push(result);
       usedChars += charCost;
-      if (result.type === 'code') expandedFilesUsed.add(result.chunk.filePath);
     }
 
     // ─── 6. Project file tree for broad queries ───
