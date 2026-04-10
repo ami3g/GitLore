@@ -3,11 +3,12 @@ import { Index } from '@lancedb/lancedb';
 import type { Table } from '@lancedb/lancedb';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { CommitChunk, CodeChunk, PRChunk, SearchResult, IndexStatus } from '../types';
+import type { CommitChunk, CodeChunk, PRChunk, SearchResult, IndexStatus, CallEdge } from '../types';
 
 const COMMITS_TABLE = 'commits';
 const CODE_TABLE = 'code_files';
 const PR_TABLE = 'pr_data';
+const CALL_GRAPH_TABLE = 'call_graph';
 const META_FILE = 'index-meta.json';
 /** Minimum row count before creating an HNSW-SQ index (below this brute-force is faster) */
 const SQ_INDEX_THRESHOLD = 10000;
@@ -49,6 +50,7 @@ type PRRecord = Record<string, unknown> & {
   description: string;
   state: string;
   author: string;
+  mergedBy: string;
   createdAt: string;
   mergedAt: string;
   linkedIssues: string;
@@ -60,6 +62,7 @@ export class VectorStore {
   private commitTable: Table | null = null;
   private codeTable: Table | null = null;
   private prTable: Table | null = null;
+  private callGraphTable: Table | null = null;
   private dbPath: string;
   /** Cached SQ state — null means not yet checked */
   private sqEnabled: boolean | null = null;
@@ -293,6 +296,7 @@ export class VectorStore {
       description: chunk.description,
       state: chunk.state,
       author: chunk.author,
+      mergedBy: chunk.mergedBy,
       createdAt: chunk.createdAt,
       mergedAt: chunk.mergedAt,
       linkedIssues: chunk.linkedIssues,
@@ -319,6 +323,7 @@ export class VectorStore {
       description: chunk.description,
       state: chunk.state,
       author: chunk.author,
+      mergedBy: chunk.mergedBy,
       createdAt: chunk.createdAt,
       mergedAt: chunk.mergedAt,
       linkedIssues: chunk.linkedIssues,
@@ -346,6 +351,7 @@ export class VectorStore {
         description: row['description'] as string,
         state: row['state'] as PRChunk['state'],
         author: row['author'] as string,
+        mergedBy: row['mergedBy'] as string ?? '',
         createdAt: row['createdAt'] as string,
         mergedAt: row['mergedAt'] as string,
         linkedIssues: row['linkedIssues'] as string,
@@ -550,11 +556,116 @@ export class VectorStore {
     return { indexed };
   }
 
+  // ─── Call Graph Table (relational — no vectors) ───
+
+  /**
+   * Create or replace the call_graph table with the given edges.
+   * This is a relational table (no vector column) — used for direct lookups.
+   */
+  async upsertCallGraph(edges: CallEdge[]): Promise<void> {
+    if (edges.length === 0) return;
+
+    const db = await this.connect();
+    const records = edges.map((e) => ({
+      callerFile: e.callerFile,
+      callerName: e.callerName,
+      calleeFile: e.calleeFile,
+      calleeName: e.calleeName,
+      line: e.line,
+    }));
+
+    try { await db.dropTable(CALL_GRAPH_TABLE); } catch { /* OK */ }
+    this.callGraphTable = await db.createTable(CALL_GRAPH_TABLE, records);
+  }
+
+  /**
+   * Query call graph edges where a given file is the caller.
+   */
+  async queryCallGraphByCaller(filePath: string): Promise<CallEdge[]> {
+    const table = await this.getCallGraphTable();
+    if (!table) return [];
+
+    try {
+      const results = await table
+        .query()
+        .where(`"callerFile" = '${filePath.replace(/'/g, "''")}'`)
+        .toArray();
+      return results.map((r: any) => ({
+        callerFile: r.callerFile,
+        callerName: r.callerName,
+        calleeFile: r.calleeFile,
+        calleeName: r.calleeName,
+        line: r.line,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Query call graph edges where a given file is the callee.
+   */
+  async queryCallGraphByCallee(filePath: string): Promise<CallEdge[]> {
+    const table = await this.getCallGraphTable();
+    if (!table) return [];
+
+    try {
+      const results = await table
+        .query()
+        .where(`"calleeFile" = '${filePath.replace(/'/g, "''")}'`)
+        .toArray();
+      return results.map((r: any) => ({
+        callerFile: r.callerFile,
+        callerName: r.callerName,
+        calleeFile: r.calleeFile,
+        calleeName: r.calleeName,
+        line: r.line,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get all call graph edges (for full graph operations like BFS closure).
+   */
+  async getAllCallGraphEdges(): Promise<CallEdge[]> {
+    const table = await this.getCallGraphTable();
+    if (!table) return [];
+
+    try {
+      const results = await table.query().toArray();
+      return results.map((r: any) => ({
+        callerFile: r.callerFile,
+        callerName: r.callerName,
+        calleeFile: r.calleeFile,
+        calleeName: r.calleeName,
+        line: r.line,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get the number of call graph edges.
+   */
+  async getCallGraphCount(): Promise<number> {
+    const table = await this.getCallGraphTable();
+    if (!table) return 0;
+    try {
+      return await table.countRows();
+    } catch {
+      return 0;
+    }
+  }
+
   async clear(): Promise<void> {
     const db = await this.connect();
     try { await db.dropTable(COMMITS_TABLE); } catch { /* OK */ }
     try { await db.dropTable(CODE_TABLE); } catch { /* OK */ }
     try { await db.dropTable(PR_TABLE); } catch { /* OK */ }
+    try { await db.dropTable(CALL_GRAPH_TABLE); } catch { /* OK */ }
     // Remove metadata files
     const metaPath = path.join(this.dbPath, '..', META_FILE);
     try { fs.unlinkSync(metaPath); } catch { /* OK */ }
@@ -564,6 +675,7 @@ export class VectorStore {
     this.commitTable = null;
     this.codeTable = null;
     this.prTable = null;
+    this.callGraphTable = null;
   }
 
   // ─── SQ State Persistence ───
@@ -630,6 +742,23 @@ export class VectorStore {
       if (tables.includes(PR_TABLE)) {
         this.prTable = await db.openTable(PR_TABLE);
         return this.prTable;
+      }
+    } catch {
+      // DB doesn't exist yet
+    }
+
+    return null;
+  }
+
+  private async getCallGraphTable(): Promise<Table | null> {
+    if (this.callGraphTable) return this.callGraphTable;
+
+    try {
+      const db = await this.connect();
+      const tables = await db.tableNames();
+      if (tables.includes(CALL_GRAPH_TABLE)) {
+        this.callGraphTable = await db.openTable(CALL_GRAPH_TABLE);
+        return this.callGraphTable;
       }
     } catch {
       // DB doesn't exist yet

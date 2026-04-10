@@ -1,6 +1,6 @@
 # PLAN.md — Git-Lore Source of Truth
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-10
 
 ---
 
@@ -240,3 +240,54 @@ gitlore/
 - [x] `RAGEngine.buildFileTree()` — converts flat paths into compact indented directory tree (capped at 4,000 chars)
 - [x] Injected into prompt for `overview` and `general` intent queries
 - [x] Gives LLM structural awareness of ALL features/modules, not just those that ranked high in vector search
+
+### Rubric-Based Prompting ✅
+- [x] 5-point ANSWER RUBRIC in system prompt: Evidence-Grounded, Cited, Complete, No Hallucination, Confidence Signal
+- [x] Updated data type descriptions: `[CODE – FULL FILE]`, `Project File Structure`
+- [x] Formatting rules: Markdown, code fences, short paragraphs, cite `[COMMIT:<hash>]` / `[FILE:<path>]` / `[PR:#<N>]`
+
+---
+
+## v3 — AST Analysis, Call Graphs & Mermaid Diagrams
+
+### Goal
+Add a **tree-sitter-based static analysis layer** that extracts AST metadata (imports, exports, functions, classes, call sites) per file, builds a full transitive call graph, stores structural edges in a new LanceDB table, enriches code chunk embeddings, and powers new CLI commands that output **Mermaid diagrams** for codebase architecture, commit history, and PR/issue context.
+
+### Phase 14: Tree-Sitter AST Extraction Service
+- [ ] Add `web-tree-sitter` dependency to @gitlore/core
+- [ ] Grammar WASM files lazy-downloaded on first use and cached (CLI: `~/.gitlore/grammars/`, VS Code: `globalStorageUri`)
+- [ ] Supported grammars: TypeScript, TSX, JavaScript, Python, Go, Rust, Java, C, C++
+- [ ] New `ASTService` class: `init()`, `parseFile(filePath, content, language) → FileSymbols`
+- [ ] S-expression queries: function/class declarations, call expressions, import/export statements
+- [ ] New types: `FileSymbols`, `SymbolInfo`, `CallSite`, `ImportInfo`, `ExportInfo`
+
+### Phase 15: Call Graph Builder
+- [ ] New `CallGraphService` class: `buildGraph(allSymbols) → CallEdge[]`
+- [ ] Resolution: same-file lookup → import tracing → fuzzy method name match
+- [ ] `getTransitiveClosure(entry) → BFS all reachable functions`
+- [ ] `getCallers(function) → reverse edges`
+- [ ] New `call_graph` LanceDB table (relational — no vector column): callerFile, callerName, calleeFile, calleeName, line
+- [ ] VectorStore: `createCallGraphTable()`, `upsertCallGraph()`, `queryCallGraph()`
+
+### Phase 16: Enrich Code Chunks with AST Metadata
+- [ ] Extend `CodeChunk` with optional: `functions?`, `classes?`, `imports?`, `exports?`
+- [ ] Update `CodeIndexer.chunkFile()` — parse full file via ASTService, tag each chunk with intersecting symbols
+- [ ] Update `CodeIndexer.toEmbeddingText()` — prepend `[DEFINES]`, `[IMPORTS]`, `[EXPORTS]` metadata
+- [ ] Extend `code_files` table schema with nullable metadata columns (backward-compatible)
+
+### Phase 17: Mermaid Diagram CLI Commands
+- [ ] New `MermaidService`: `generateCodeArchitecture()`, `generateCallGraph()`, `generateCommitTimeline()`, `generatePRIssueFlow()`
+- [ ] CLI commands: `gitlore diagram architecture`, `gitlore diagram callgraph [--entry <fn>]`, `gitlore diagram commits [--limit <n>]`, `gitlore diagram prs`
+- [ ] All output Mermaid syntax to stdout (pipeable)
+
+### Phase 18: Structural Context in RAG Query
+- [ ] Update `RAGEngine.query()` — fetch FileSymbols for expanded files, build structural context section
+- [ ] Update `buildPrompt()` — accept optional `structuralContext` parameter, insert between code and file tree
+- [ ] Update system prompt DATA TYPES — add `[STRUCTURE]` description
+
+### Key Decisions (v3)
+- **web-tree-sitter** over native tree-sitter: avoids node-gyp, works in VS Code WASM sandbox. Slower parsing acceptable for indexing.
+- **Call graph in separate table** (no vectors): edges are relational, not semantic.
+- **Mermaid to stdout**: pipeable, no rendering dependency.
+- **Full transitive closure at query time via BFS**: keeps storage small, always fresh.
+- **AST metadata is additive**: nullable columns, no forced reindex of existing data.

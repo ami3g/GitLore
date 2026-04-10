@@ -200,7 +200,7 @@ export class GitHubService {
   private async prToChunk(
     owner: string,
     repo: string,
-    pr: { number: number; title: string; body: string | null; state: string; merged_at: string | null; user: { login: string } | null; created_at: string; merge_commit_sha: string | null; updated_at: string },
+    pr: { number: number; title: string; body: string | null; state: string; merged_at: string | null; merged_by?: { login: string } | null; user: { login: string } | null; created_at: string; merge_commit_sha: string | null; updated_at: string },
     scale: RepoScale
   ): Promise<PRChunk> {
     const linkedIssueNums = this.parseLinkedIssues(pr.body ?? '');
@@ -233,6 +233,7 @@ export class GitHubService {
       description: (pr.body ?? '').slice(0, 2000),
       state,
       author: pr.user?.login ?? 'unknown',
+      mergedBy: pr.merged_by?.login ?? '',
       createdAt: pr.created_at,
       mergedAt: pr.merged_at ?? '',
       linkedIssues: issueLabels.join(', '),
@@ -264,7 +265,7 @@ export class GitHubService {
   toEmbeddingText(chunk: PRChunk): string {
     const parts = [
       `PR #${chunk.prNumber}: ${chunk.title}`,
-      `State: ${chunk.state} | Author: ${chunk.author}`,
+      `State: ${chunk.state} | Author: ${chunk.author}${chunk.mergedBy ? ` | Merged by: ${chunk.mergedBy}` : ''}`,
     ];
     if (chunk.description) parts.push(chunk.description);
     if (chunk.linkedIssues) parts.push(`Linked issues: ${chunk.linkedIssues}`);

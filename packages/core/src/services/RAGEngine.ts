@@ -17,7 +17,15 @@ const SYSTEM_PROMPT = `You are GitLore, a specialized Repository Historian with 
 DATA TYPES YOU RECEIVE:
 • [COMMIT] — Historical git commits with diffs, authors, dates. Use for “when”, “why”, and “who” questions.
 • [CODE] — Current source file snippets with file paths, languages, and line numbers. Use for “what does this code do”, “where is X defined”, and architecture questions.
-• [PR] — Pull requests and linked issues. Use for feature context, review decisions, and linking changes to higher-level goals.
+• [CODE – FULL FILE] — Expanded full-file context for top-ranked code results. Prefer these over individual chunks when available.
+• [PR] — Pull requests and linked issues. Use for feature context, review decisions, and linking changes to higher-level goals.• [STRUCTURE] — Call graph and symbol information (defines, imports, callers, callees) for top-ranked files. Use to explain how functions connect and data flows through the codebase.• Project File Structure — A directory tree of all indexed source files. Use this to identify features, modules, and capabilities even if their code was not directly retrieved.
+
+ANSWER RUBRIC — Evaluate your response against these criteria before finalizing:
+1. **Evidence-grounded**: Every claim must trace to a specific retrieved snippet. If you cannot find evidence, state "The retrieved context does not cover X" instead of guessing.
+2. **Cited**: Reference file paths, commit hashes, PR numbers, or line ranges for key points. Never say "in the codebase" — be specific.
+3. **Complete**: Address all parts of the question. If context only partially answers it, answer what you can and explicitly note what is missing.
+4. **No hallucination**: Do not invent file names, function names, commit hashes, or features not present in the retrieved snippets or file tree. If the file tree shows a path but no code was retrieved, you may mention its existence but not speculate on implementation.
+5. **Confidence signal**: When context is limited, end with a brief italic note, e.g., *"Note: Based on [N] code snippets and [M] commits. Retrieved context may not cover all relevant files."*
 
 STRICT FORMATTING RULES:
 1. Use ### for Date headers (e.g., ### March 10, 2026) when discussing commits.
@@ -33,7 +41,7 @@ CONVERSATION CONTEXT: Use the provided conversation history for continuity, but 
 TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
 
 // Rough character budget — ~4 chars per token, leave room for the response
-const MAX_PROMPT_CHARS = 24000;
+const MAX_PROMPT_CHARS = 60000;
 
 export class RAGEngine {
   private config: GitLoreConfig;
@@ -301,7 +309,9 @@ export class RAGEngine {
     onChunk?: StreamCallback,
     conversationHistory?: LLMMessage[],
     /** Optional: directory prefix of the active file (for large-repo scoping) */
-    activeDirectory?: string
+    activeDirectory?: string,
+    /** Override the base top-K retrieval count */
+    topKOverride?: number
   ): Promise<string> {
     const storePath = this.getStorePath(repoPath);
     const store = this.getVectorStore(storePath);
@@ -323,7 +333,7 @@ export class RAGEngine {
 
     // ─── 2. Search all 3 tables with intent-aware breadth ───
     // Search broadly, but the greedy filler limits what actually enters the prompt
-    const baseTopK = scale === 'large' ? 10 : this.config.topK;
+    const baseTopK = topKOverride ?? (scale === 'large' ? 10 : this.config.topK);
 
     // Code always searches wide (many more chunks than commits)
     const codeTopK = Math.max(baseTopK * 4, 20);
@@ -382,8 +392,8 @@ export class RAGEngine {
     //   overview → expand top 3 files (README, main entry, etc.)
     //   implementation/general → expand top 3 files (see the whole module)
     //   historical/debugging → expand top 1 file (focus on the specific area)
-    const EXPAND_FILES = (weights.intent === 'historical' || weights.intent === 'debugging') ? 1 : 3;
-    const MAX_EXPAND_CHARS = 3000; // cap per expanded file
+    const EXPAND_FILES = (weights.intent === 'historical' || weights.intent === 'debugging') ? 3 : 5;
+    const MAX_EXPAND_CHARS = 6000; // cap per expanded file
 
     // Find unique file paths from top code results
     const topCodeFiles: string[] = [];
@@ -479,7 +489,33 @@ export class RAGEngine {
       }
     }
 
-    const messages = this.buildPrompt(question, merged, conversationHistory, expandedFiles, projectTree);
+    // ─── 7. Structural context from call graph ───
+    // For expanded files, show what they define, import, and connect to.
+    let structuralContext: string | undefined;
+    if (expandedFiles.size > 0) {
+      const structParts: string[] = [];
+      for (const fp of expandedFiles.keys()) {
+        const callerEdges = await store.queryCallGraphByCaller(fp);
+        const calleeEdges = await store.queryCallGraphByCallee(fp);
+        if (callerEdges.length === 0 && calleeEdges.length === 0) continue;
+
+        const lines: string[] = [`[STRUCTURE] File: ${fp}`];
+        if (callerEdges.length > 0) {
+          const callees = [...new Set(callerEdges.map((e) => `${e.calleeName} (${e.calleeFile})`))];
+          lines.push(`  Calls: ${callees.slice(0, 15).join(', ')}`);
+        }
+        if (calleeEdges.length > 0) {
+          const callers = [...new Set(calleeEdges.map((e) => `${e.callerName} (${e.callerFile})`))];
+          lines.push(`  Called by: ${callers.slice(0, 15).join(', ')}`);
+        }
+        structParts.push(lines.join('\n'));
+      }
+      if (structParts.length > 0) {
+        structuralContext = structParts.join('\n\n');
+      }
+    }
+
+    const messages = this.buildPrompt(question, merged, conversationHistory, expandedFiles, projectTree, structuralContext);
 
     const provider = this.getLLMProvider();
     return provider.sendMessage(messages, onChunk);
@@ -585,7 +621,8 @@ export class RAGEngine {
     results: SearchResult[],
     conversationHistory?: LLMMessage[],
     expandedFiles?: Map<string, string>,
-    projectTree?: string
+    projectTree?: string,
+    structuralContext?: string,
   ): LLMMessage[] {
     // Track which files have already been rendered via expanded content
     const renderedExpanded = new Set<string>();
@@ -644,11 +681,15 @@ export class RAGEngine {
       .filter(Boolean)
       .join('\n\n');
 
+    const structurePreamble = structuralContext
+      ? `## Code Structure (Call Graph)\n\nThe following shows how the top-ranked files connect to other code:\n\n${structuralContext}\n\n---\n\n`
+      : '';
+
     const treePreamble = projectTree
       ? `## Project File Structure\n\nThe following is a complete listing of source files in this repository. Use this to identify features, modules, and capabilities — even those not directly retrieved above:\n\n${projectTree}\n\n---\n\n`
       : '';
 
-    const userMessage = `Here are the most relevant snippets from the repository:\n\n${contextSnippets}\n\n---\n\n${treePreamble}Question: ${question}`;
+    const userMessage = `Here are the most relevant snippets from the repository:\n\n${contextSnippets}\n\n---\n\n${structurePreamble}${treePreamble}Question: ${question}`;
 
     // Hard safety cap: if the prompt is still too large, truncate the user message
     const maxUserChars = MAX_PROMPT_CHARS - SYSTEM_PROMPT.length - 200;

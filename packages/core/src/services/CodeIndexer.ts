@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CodeChunk } from '../types';
+import type { FileSymbols } from '../types';
 import type { ProgressCallback } from './GitProcessor';
 
 // ─── Chunk Settings ───
@@ -104,9 +105,10 @@ export class CodeIndexer {
   /**
    * Chunk a single file into 256-line windows with 50-line overlap.
    * When hierarchical=true (large repos), also produces a file-level summary chunk.
+   * When fileSymbols is provided, each chunk is tagged with intersecting AST metadata.
    * Returns the chunks + a content hash for incremental detection.
    */
-  chunkFile(filePath: string, content: string, hierarchical = false): { chunks: CodeChunk[]; contentHash: string } {
+  chunkFile(filePath: string, content: string, hierarchical = false, fileSymbols?: FileSymbols): { chunks: CodeChunk[]; contentHash: string } {
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
     const lines = content.split('\n');
     const chunks: CodeChunk[] = [];
@@ -133,13 +135,20 @@ export class CodeIndexer {
       // Skip nearly-empty chunks (< 3 non-blank lines)
       if (chunkContent.replace(/\s/g, '').length < 20) continue;
 
-      chunks.push({
+      const chunk: CodeChunk = {
         filePath,
         language,
         startLine: start + 1, // 1-based
         endLine: end,
         content: chunkContent,
-      });
+      };
+
+      // Tag chunk with intersecting AST metadata when available
+      if (fileSymbols) {
+        this.tagChunkWithAST(chunk, fileSymbols);
+      }
+
+      chunks.push(chunk);
 
       if (end >= lines.length) break;
     }
@@ -220,15 +229,63 @@ export class CodeIndexer {
   /**
    * Build embedding text for a code chunk.
    * Summary chunks use [SUMMARY] prefix; detail chunks use [CODE].
+   * AST metadata (if present) is prepended as [DEFINES], [IMPORTS], [EXPORTS] lines.
    */
   toEmbeddingText(chunk: CodeChunk): string {
     if (chunk.isSummary) {
       return chunk.content; // Summary already includes the [SUMMARY] header
     }
-    return [
+
+    const parts: string[] = [
       `[CODE] File: ${chunk.filePath} | Language: ${chunk.language} | Lines ${chunk.startLine}-${chunk.endLine}`,
-      chunk.content,
-    ].join('\n');
+    ];
+
+    // Prepend AST metadata when available
+    if (chunk.functions?.length || chunk.classes?.length) {
+      const defines = [...(chunk.functions ?? []), ...(chunk.classes ?? [])];
+      parts.push(`[DEFINES] ${defines.join(', ')}`);
+    }
+    if (chunk.imports?.length) {
+      parts.push(`[IMPORTS] ${chunk.imports.join(', ')}`);
+    }
+    if (chunk.exports?.length) {
+      parts.push(`[EXPORTS] ${chunk.exports.join(', ')}`);
+    }
+
+    parts.push(chunk.content);
+    return parts.join('\n');
+  }
+
+  /**
+   * Tag a chunk with AST metadata by checking which symbols intersect
+   * the chunk's line range.
+   */
+  private tagChunkWithAST(chunk: CodeChunk, symbols: FileSymbols): void {
+    const { startLine, endLine } = chunk;
+
+    // Functions/methods that overlap this chunk
+    const fnNames = symbols.functions
+      .filter((f) => f.startLine <= endLine && f.endLine >= startLine)
+      .map((f) => f.name);
+    if (fnNames.length > 0) chunk.functions = fnNames;
+
+    // Classes that overlap this chunk
+    const clsNames = symbols.classes
+      .filter((c) => c.startLine <= endLine && c.endLine >= startLine)
+      .map((c) => c.name);
+    if (clsNames.length > 0) chunk.classes = clsNames;
+
+    // Imports in this chunk's range
+    const impSources = symbols.imports
+      .filter((i) => i.line >= startLine && i.line <= endLine)
+      .map((i) => i.source);
+    if (impSources.length > 0) chunk.imports = impSources;
+
+    // Exports in this chunk's range
+    const expNames = symbols.exports
+      .filter((e) => e.line >= startLine && e.line <= endLine)
+      .map((e) => e.name);
+    if (expNames.length > 0) chunk.exports = expNames;
   }
 
   // ─── Meta persistence ───

@@ -20,6 +20,14 @@ export interface CodeChunk {
   content: string;
   /** True for file-level summary chunks (hierarchical indexing for large repos) */
   isSummary?: boolean;
+  /** Function/method names defined in this chunk's line range */
+  functions?: string[];
+  /** Class names defined in this chunk's line range */
+  classes?: string[];
+  /** Import sources referenced in this chunk's line range */
+  imports?: string[];
+  /** Export names in this chunk's line range */
+  exports?: string[];
 }
 
 // ─── PR/Issue Context ───
@@ -30,10 +38,66 @@ export interface PRChunk {
   description: string;
   state: 'open' | 'closed' | 'merged';
   author: string;
+  mergedBy: string;
   createdAt: string;
   mergedAt: string;
   linkedIssues: string;     // comma-separated "Title (#N)" entries
   resolvedBy: string;       // merge commit SHA or empty
+}
+
+// ─── AST / Call Graph ───
+
+export interface SymbolInfo {
+  name: string;
+  startLine: number;
+  endLine: number;
+  /** For functions: parameter names (e.g. ["req", "res"]) */
+  params?: string[];
+  /** For classes: method names */
+  methods?: string[];
+}
+
+export interface ImportInfo {
+  /** The module/file being imported (e.g. "./utils", "express") */
+  source: string;
+  /** Named imports (e.g. ["Router", "Request"]) */
+  names: string[];
+  /** Line number of the import statement */
+  line: number;
+}
+
+export interface ExportInfo {
+  /** Exported symbol name */
+  name: string;
+  /** Line number */
+  line: number;
+}
+
+export interface CallSite {
+  /** Name of the calling function (or "<module>" for top-level) */
+  caller: string;
+  /** Name of the called function/method */
+  callee: string;
+  /** Line number of the call */
+  line: number;
+}
+
+export interface FileSymbols {
+  filePath: string;
+  language: string;
+  functions: SymbolInfo[];
+  classes: SymbolInfo[];
+  imports: ImportInfo[];
+  exports: ExportInfo[];
+  callSites: CallSite[];
+}
+
+export interface CallEdge {
+  callerFile: string;
+  callerName: string;
+  calleeFile: string;
+  calleeName: string;
+  line: number;
 }
 
 export interface IndexStatus {

@@ -16,7 +16,8 @@
     "@octokit/rest": "^22.0.1",
     "apache-arrow": "^17.0.0",
     "openai": "^4.77.0",
-    "simple-git": "^3.27.0"
+    "simple-git": "^3.27.0",
+    "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

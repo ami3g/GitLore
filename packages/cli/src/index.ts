@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { RAGEngine, GitProcessor, GitHubService, type GitLoreConfig, DEFAULT_CONFIG } from '@gitlore/core';
+import {
+  RAGEngine, GitProcessor, GitHubService, CodeIndexer, EmbeddingService, VectorStore,
+  ASTService, CallGraphService, MermaidService,
+  type GitLoreConfig, DEFAULT_CONFIG, type PRChunk
+} from '@gitlore/core';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 const program = new Command();
 
@@ -146,14 +151,15 @@ program
 program
   .command('query <question>')
   .description('Ask a question about the repository history')
-  .action(async (question: string) => {
+  .option('--top-k <number>', 'Number of results to retrieve (higher = more context)', '10')
+  .action(async (question: string, opts: { topK: string }) => {
     const config = loadConfig();
     const engine = new RAGEngine(config);
     const repoPath = process.cwd();
 
     await engine.query(repoPath, question, (chunk) => {
       process.stdout.write(chunk);
-    });
+    }, undefined, undefined, parseInt(opts.topK, 10));
 
     console.log();
   });
@@ -201,6 +207,150 @@ program
 
     await engine.clearIndex(repoPath);
     console.log('Index cleared.');
+  });
+
+// ─── Diagram Commands ───
+
+const diagram = program
+  .command('diagram')
+  .description('Generate Mermaid diagrams from the indexed codebase');
+
+/** Shared helper: parse all code files and build call graph */
+async function buildASTAndCallGraph(repoPath: string) {
+  const grammarDir = path.join(os.homedir(), '.gitlore', 'grammars');
+  const ast = new ASTService(grammarDir);
+  await ast.init();
+
+  const indexer = new CodeIndexer(repoPath);
+  const files = await indexer.listFiles();
+
+  console.error(`Parsing ${files.length} files for AST...`);
+  const fileContents: { filePath: string; content: string; language: string }[] = [];
+
+  for (const relPath of files) {
+    const absPath = path.join(repoPath, relPath);
+    try {
+      const content = fs.readFileSync(absPath, 'utf-8');
+      const ext = path.extname(relPath).toLowerCase();
+      const langMap: Record<string, string> = {
+        '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript', '.jsx': 'javascript',
+        '.py': 'python', '.go': 'go', '.rs': 'rust', '.java': 'java',
+        '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp',
+      };
+      const language = langMap[ext];
+      if (language) {
+        fileContents.push({ filePath: relPath, content, language });
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  const allSymbols = await ast.parseFiles(fileContents);
+  console.error(`Parsed ${allSymbols.size} files. Building call graph...`);
+
+  const cg = new CallGraphService();
+  const edges = cg.buildGraph(allSymbols);
+  console.error(`Call graph: ${edges.length} edges.`);
+
+  ast.dispose();
+  return { allSymbols, edges, cg };
+}
+
+diagram
+  .command('architecture')
+  .description('Generate a code architecture Mermaid diagram')
+  .action(async () => {
+    const repoPath = process.cwd();
+    const { allSymbols, edges } = await buildASTAndCallGraph(repoPath);
+    const mermaid = new MermaidService();
+    console.log(mermaid.generateCodeArchitecture(allSymbols, edges));
+  });
+
+diagram
+  .command('callgraph')
+  .description('Generate a call graph Mermaid diagram')
+  .option('--entry <function>', 'Entry function to trace from')
+  .action(async (opts) => {
+    const repoPath = process.cwd();
+    const { allSymbols, edges, cg } = await buildASTAndCallGraph(repoPath);
+    const mermaid = new MermaidService();
+
+    let closure: { file: string; name: string }[] | undefined;
+
+    if (opts.entry) {
+      // Find the entry function across all files
+      for (const [file, symbols] of allSymbols) {
+        const fn = symbols.functions.find((f) => f.name === opts.entry);
+        if (fn) {
+          closure = cg.getTransitiveClosure(file, fn.name, edges);
+          console.error(`Tracing from ${fn.name} in ${file}: ${closure.length} reachable functions`);
+          break;
+        }
+      }
+      if (!closure) {
+        console.error(`Warning: function '${opts.entry}' not found, showing full graph`);
+      }
+    }
+
+    console.log(mermaid.generateCallGraph(edges, closure));
+  });
+
+diagram
+  .command('commits')
+  .description('Generate a commit timeline Mermaid diagram')
+  .option('--limit <number>', 'Maximum number of commits', '30')
+  .action(async (opts) => {
+    const repoPath = process.cwd();
+    const storePath = path.join(repoPath, '.vscode', 'git-lore');
+
+    const store = new VectorStore(path.join(storePath, 'db'));
+    const status = await store.getStatus();
+
+    if (!status.indexed || status.commitCount === 0) {
+      console.error('No commits indexed. Run `gitlore index` first.');
+      process.exit(1);
+    }
+
+    const cacheDir = path.join(storePath, 'models');
+    const embedding = new EmbeddingService(cacheDir);
+    const queryVec = await embedding.embed('recent commits changes update');
+
+    const results = await store.search(queryVec, parseInt(opts.limit, 10));
+    const commits = results
+      .filter((r) => r.type === 'commit')
+      .map((r) => r.chunk as any);
+
+    const mermaid = new MermaidService();
+    console.log(mermaid.generateCommitTimeline(commits, parseInt(opts.limit, 10)));
+  });
+
+diagram
+  .command('prs')
+  .description('Generate a PR/Issue flow Mermaid diagram')
+  .action(async () => {
+    const repoPath = process.cwd();
+    const storePath = path.join(repoPath, '.vscode', 'git-lore');
+
+    const store = new VectorStore(path.join(storePath, 'db'));
+    const status = await store.getStatus();
+
+    if (status.prCount === 0) {
+      console.error('No PRs indexed. Run `gitlore index-prs` first.');
+      process.exit(1);
+    }
+
+    const cacheDir = path.join(storePath, 'models');
+    const embedding = new EmbeddingService(cacheDir);
+    const queryVec = await embedding.embed('all pull requests issues');
+
+    const results = await store.searchPR(queryVec, 100);
+    const prs = results
+      .filter((r) => r.type === 'pr')
+      .map((r) => r.chunk as PRChunk);
+
+    const mermaid = new MermaidService();
+    console.log(mermaid.generatePRIssueFlow(prs));
   });
 
 program.parse();

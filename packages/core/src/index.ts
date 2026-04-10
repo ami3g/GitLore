@@ -6,6 +6,9 @@ export { GitHubService, type RepoScale } from './services/GitHubService';
 export { classifyIntent, rerank, type QueryIntent, type IntentWeights } from './services/IntentRouter';
 export { EmbeddingService } from './services/EmbeddingService';
 export { VectorStore } from './services/VectorStore';
+export { ASTService } from './services/ASTService';
+export { CallGraphService } from './services/CallGraphService';
+export { MermaidService } from './services/MermaidService';
 
 // ─── LLM Providers ───
 export { OpenAIProvider } from './services/llm/OpenAIProvider';
@@ -29,6 +32,12 @@ export type {
   LLMMessage,
   ChatMessageRole,
   ChatMessage,
+  SymbolInfo,
+  ImportInfo,
+  ExportInfo,
+  CallSite,
+  FileSymbols,
+  CallEdge,
 } from './types';
 
 // Re-export webview message types (used by vscode package)
