@@ -527,14 +527,31 @@ export class RAGEngine {
     // Track which files have expanded (full-file) content — only skip individual chunks for THOSE files
     const expandedFileSet = new Set(expandedFiles.keys());
 
+    // Account for expanded files in the char budget (they use prompt space too)
+    for (const [, content] of expandedFiles) {
+      usedChars += content.length + 100; // +100 for header formatting
+    }
+
+    // For each expanded file, add ONE representative code result to `merged` so the
+    // expanded content gets rendered via buildPrompt(). Pick the highest-ranked chunk per file.
+    const expandedFilesAdded = new Set<string>();
+    for (let i = 0; i < allCandidates.length; i++) {
+      const r = allCandidates[i];
+      if (r.type === 'code' && expandedFileSet.has(r.chunk.filePath) && !expandedFilesAdded.has(r.chunk.filePath)) {
+        merged.push(r);
+        usedIndices.add(i);
+        expandedFilesAdded.add(r.chunk.filePath);
+      }
+    }
+
     // Intent-aware seed: code first for overview/impl/general, commits first for hist/debug
     const commitFirst = weights.intent === 'historical' || weights.intent === 'debugging';
     const seedOrder = commitFirst
-      ? [allCandidates.findIndex((r) => r.type === 'commit'), allCandidates.findIndex((r) => r.type === 'code')]
-      : [allCandidates.findIndex((r) => r.type === 'code'), allCandidates.findIndex((r) => r.type === 'commit')];
+      ? [allCandidates.findIndex((r) => r.type === 'commit'), allCandidates.findIndex((r) => r.type === 'code' && !expandedFileSet.has(r.chunk.filePath))]
+      : [allCandidates.findIndex((r) => r.type === 'code' && !expandedFileSet.has(r.chunk.filePath)), allCandidates.findIndex((r) => r.type === 'commit')];
 
     for (const seedIdx of seedOrder) {
-      if (seedIdx >= 0) {
+      if (seedIdx >= 0 && !usedIndices.has(seedIdx)) {
         const result = allCandidates[seedIdx];
         const charCost = this.estimateSnippetChars(result);
         merged.push(result);
@@ -557,6 +574,12 @@ export class RAGEngine {
       merged.push(result);
       usedChars += charCost;
     }
+
+    console.error(
+      `[RAGEngine] Pipeline: ${allCandidates.length} candidates → ` +
+      `${expandedFiles.size} expanded files + ${merged.length - expandedFilesAdded.size} additional snippets = ` +
+      `${merged.length} total in prompt (${Math.round(usedChars / 1000)}K chars of ${Math.round(snippetBudget / 1000)}K budget)`
+    );
 
     // ─── 6. Project file tree for broad queries ───
     // For overview/general intent, include a compact file tree so the LLM
