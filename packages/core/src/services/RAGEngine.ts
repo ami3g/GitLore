@@ -519,7 +519,9 @@ export class RAGEngine {
     }
 
     // ─── 5. Greedy token filling with diversity ───
-    const snippetBudget = MAX_PROMPT_CHARS * 0.6;
+    // Reserve ~10K for system prompt (~3K), structural context, file tree, conversation
+    // history, and the question itself. Everything else goes to retrieved snippets.
+    const snippetBudget = MAX_PROMPT_CHARS - 10000;
     let usedChars = 0;
     const merged: SearchResult[] = [];
     const usedIndices = new Set<number>();
