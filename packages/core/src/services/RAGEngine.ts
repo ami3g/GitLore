@@ -593,14 +593,15 @@ export class RAGEngine {
           lines.push(`  Called by: ${callers.slice(0, 15).join(', ')}`);
         }
         if (coChangeEdges.length > 0) {
-          // Show files that frequently change together, sorted by weight (co-occurrence count)
+          // Only surface top 5 highest-weight co-change edges to avoid prompt clutter
           const coChanged = coChangeEdges
             .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+            .slice(0, 5)
             .map((e) => {
               const otherFile = e.callerFile === fp ? e.calleeFile : e.callerFile;
               return `${otherFile} (${e.weight} commits)`;
             });
-          lines.push(`  Frequently changed with: ${coChanged.slice(0, 10).join(', ')}`);
+          lines.push(`  Frequently changed with: ${coChanged.join(', ')}`);
         }
         structParts.push(lines.join('\n'));
       }
