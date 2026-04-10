@@ -24,8 +24,17 @@ Git-Lore indexes your commit history, current source files, and GitHub PRs/issue
  │  • smart          + 50-line       issues     │
  │    truncation      overlap      • resolution │
  │  • 57-rule       • hierarchical   metadata   │
- │    exclusions      summaries                 │
+ │    exclusions      summaries    • merged-by  │
  │                    (large repos)             │
+ └────────────────────┬─────────────────────────┘
+                      │
+                      ▼
+ ┌──────────────────────────────────────────────┐
+ │          ASTService (web-tree-sitter)        │
+ │  Tree-sitter WASM · 9 languages              │
+ │  Functions, classes, imports, exports, calls  │
+ │  → FileSymbols per file                      │
+ │  → CallGraphService: transitive call edges   │
  └────────────────────┬─────────────────────────┘
                       │
                       ▼
@@ -33,19 +42,22 @@ Git-Lore indexes your commit history, current source files, and GitHub PRs/issue
  │         EmbeddingService (local)             │
  │  all-MiniLM-L6-v2 · 384-dim · q8 quantized  │
  │  Batch 32 · Runs entirely in Node.js         │
+ │  AST metadata prepended: [DEFINES]/[IMPORTS] │
  └────────────────────┬─────────────────────────┘
                       │
                       ▼
  ┌──────────────────────────────────────────────┐
  │           VectorStore (LanceDB)              │
  │                                              │
- │  ┌──────────┐ ┌──────────┐ ┌──────────┐     │
- │  │ commits  │ │code_files│ │ pr_data  │     │
- │  └──────────┘ └──────────┘ └──────────┘     │
+ │  ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐ │
+ │  │commits │ │code_files│ │pr_data│ │call_  │ │
+ │  │        │ │         │ │       │ │graph  │ │
+ │  └────────┘ └─────────┘ └───────┘ └───────┘ │
  │                                              │
  │  • HNSW-SQ indices for large repos (10K+)    │
  │  • refineFactor(3) for SQ rescoring          │
  │  • Directory-scoped search with bubble-up    │
+ │  • Call graph: relational edges (no vectors) │
  └────────────────────┬─────────────────────────┘
                       │
                       ▼
@@ -73,10 +85,13 @@ Git-Lore indexes your commit history, current source files, and GitHub PRs/issue
  │  (top N files → full context)                │
  │       │                                      │
  │       ▼                                      │
- │  Greedy token filling (60% of 24K budget)    │
+ │  Greedy token filling (60% of 60K budget)    │
  │       │                                      │
  │       ▼                                      │
  │  File tree injection (overview/general)      │
+ │       │                                      │
+ │       ▼                                      │
+ │  Structural context (AST symbols for top files)│
  │       │                                      │
  │       ▼                                      │
  │  LLM (Ollama local / OpenAI cloud)           │
@@ -86,13 +101,14 @@ Git-Lore indexes your commit history, current source files, and GitHub PRs/issue
  └──────────────────────────────────────────────┘
 ```
 
-### The Three Data Types
+### The Four Data Types
 
 | Type | Source | What's Indexed | Best For |
 |------|--------|----------------|----------|
 | **[COMMIT]** | `git log` + diffs | Per-file diff chunks with author, date, message | "When was X changed?", "Who added this?", "Why was this rewritten?" |
-| **[CODE]** | `git ls-files` | 256-line chunks of current source code | "How does the auth module work?", "Where is X defined?" |
-| **[PR]** | GitHub API | PR descriptions, linked issues, merge status | "What was the goal of this feature?", "Which issue did this fix?" |
+| **[CODE]** | `git ls-files` | 256-line chunks enriched with AST metadata (functions, imports, exports) | "How does the auth module work?", "Where is X defined?" |
+| **[PR]** | GitHub API | PR descriptions, linked issues, merge status, merged-by author | "What was the goal of this feature?", "Which issue did this fix?" |
+| **[STRUCTURE]** | tree-sitter AST | Call graph edges, function/class declarations, imports/exports | "What calls this function?", "Show the architecture" |
 
 ### Intent-Based Routing
 
@@ -111,9 +127,11 @@ Results are reranked by intent weights, then greedily packed into the prompt unt
 ### Smart Retrieval
 
 **Small-to-Big Expansion:** Vector search finds the best 256-line chunk, then Git-Lore fetches ALL chunks for that file and reconstructs the full context. The LLM sees complete modules, not isolated fragments.
-- Overview/implementation queries: top 3 files expanded
-- Historical/debugging queries: top 1 file expanded
-- Each expanded file capped at 3,000 chars
+- Overview/implementation queries: top 5 files expanded
+- Historical/debugging queries: top 3 files expanded
+- Each expanded file capped at 6,000 chars
+
+**Structural Context:** For expanded files, AST-extracted symbols (functions, classes, imports, exports) are injected into the prompt as `[STRUCTURE]` blocks, giving the LLM awareness of call relationships and module boundaries.
 
 **Project File Tree:** For overview and general queries, a compact directory tree of all indexed source files is injected into the prompt. This gives the LLM structural awareness of features and modules even if their code didn't rank in the top vector search results.
 
@@ -167,6 +185,13 @@ npx gitlore index --depth 2000
 
 # Ask a question
 npx gitlore query "why was the auth middleware rewritten?"
+npx gitlore query "how does routing work?" --top-k 20
+
+# Generate Mermaid diagrams
+npx gitlore diagram architecture
+npx gitlore diagram callgraph --entry handleRequest
+npx gitlore diagram commits --limit 30
+npx gitlore diagram prs
 
 # Quick standup summary
 npx gitlore standup
@@ -183,7 +208,12 @@ CLI Commands:
 | `gitlore index-code` | Re-index only source files (fast, incremental) |
 | `gitlore index-prs` | Re-index only PRs from GitHub |
 | `gitlore query <question>` | Ask about the repository |
+| `gitlore query <q> --top-k <n>` | Ask with custom result count |
 | `gitlore standup` | Summarize recent changes |
+| `gitlore diagram architecture` | Mermaid diagram of file/module structure |
+| `gitlore diagram callgraph` | Mermaid call graph (optional `--entry <fn>`) |
+| `gitlore diagram commits` | Mermaid commit timeline (optional `--limit <n>`) |
+| `gitlore diagram prs` | Mermaid PR/issue flow |
 | `gitlore status` | Show index stats |
 | `gitlore clear` | Delete the local index |
 
@@ -247,9 +277,12 @@ gitlore/
 │   │       ├── services/
 │   │       │   ├── GitProcessor.ts      Git log extraction, file-level chunking
 │   │       │   ├── CodeIndexer.ts       Source file chunking (256-line + summaries)
+│   │       │   ├── ASTService.ts        Tree-sitter parsing (9 languages)
+│   │       │   ├── CallGraphService.ts  Transitive call graph builder
+│   │       │   ├── MermaidService.ts    Mermaid diagram generators
 │   │       │   ├── GitHubService.ts     PR/issue fetching via Octokit
 │   │       │   ├── EmbeddingService.ts  all-MiniLM-L6-v2 (transformers.js)
-│   │       │   ├── VectorStore.ts       LanceDB wrapper (3 tables + SQ indices)
+│   │       │   ├── VectorStore.ts       LanceDB wrapper (4 tables + SQ indices)
 │   │       │   ├── IntentRouter.ts      Query intent classification + reranking
 │   │       │   ├── RAGEngine.ts         Orchestrator (index + query + summarize)
 │   │       │   └── llm/
@@ -281,6 +314,8 @@ git log → GitProcessor → CommitChunks ──┐
 git ls-files → CodeIndexer → CodeChunks ─┼─→ EmbeddingService → VectorStore (LanceDB)
 GitHub API → GitHubService → PRChunks ──┘         │
                                          ┌────────┘
+       ASTService → FileSymbols ─────────┤
+       CallGraphService → CallEdges ─────┘
                                          ▼
                               Large repos? → ensureSQIndices()
 ```
@@ -304,7 +339,10 @@ Question → embed(question)
          Small-to-Big expansion (top N files → full context)
               │
               ▼
-         greedy token fill (60% of 24K budget)
+         Structural context (AST symbols for expanded files)
+              │
+              ▼
+         greedy token fill (60% of 60K budget)
               │
               ▼
          file tree injection (overview/general queries)
@@ -317,7 +355,8 @@ Question → embed(question)
 
 ```
 .vscode/git-lore/
-├── db/                LanceDB vector database (3 tables)
+├── db/                LanceDB vector database (4 tables)
+├── grammars/          Cached tree-sitter WASM grammars (~1MB each)
 ├── models/            Cached embedding model (~80MB, downloaded once)
 ├── index-meta.json    Last indexed commit hash (for incremental)
 ├── code-meta.json     File content hashes (for incremental code)
@@ -347,8 +386,9 @@ Add `.vscode/git-lore/` to your `.gitignore`.
 | Component | Library | Role |
 |-----------|---------|------|
 | Git extraction | `simple-git` | Commit log, diffs, blame, ls-files |
+| AST parsing | `web-tree-sitter` | Function/class/import extraction (9 languages) |
 | Embeddings | `@huggingface/transformers` | all-MiniLM-L6-v2, 384-dim, q8 quantized |
-| Vector DB | `@lancedb/lancedb` | 3 tables, HNSW-SQ indexing, directory-scoped search |
+| Vector DB | `@lancedb/lancedb` | 4 tables, HNSW-SQ indexing, directory-scoped search |
 | GitHub API | `@octokit/rest` | PR descriptions, linked issues |
 | OpenAI | `openai` SDK | Streaming chat completions |
 | Ollama | REST API (fetch) | Local NDJSON streaming |

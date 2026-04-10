@@ -195,9 +195,13 @@ gitlore/
 - **Incremental indexing**: `index-meta.json` stores `lastIndexedHash` for commits; `code-meta.json` stores file content hashes for code
 - **Rebase safety**: `git cat-file -t <hash>` verifies hash exists before incremental
 - **Paged extraction**: async generator yields 200-commit pages; embedding + DB writes happen per page then discard
-- **Token budget**: `MAX_PROMPT_CHARS = 24000`; system + snippets are fixed cost; oldest history dropped first
+- **Token budget**: `MAX_PROMPT_CHARS = 60000`; system + snippets are fixed cost; oldest history dropped first
 - **Hierarchical code indexing**: large repos get 2-level embeddings — file summary (head+tail) for broad queries + 256-line detail chunks for specific queries
+- **4 LanceDB tables**: commits (vector), code_files (vector), pr_data (vector), call_graph (relational — no vectors)
 - **HNSW-SQ indices**: created on tables with 10K+ rows, compresses float32 → scalar quantized vectors for O(log n) search
+- **AST-enriched embeddings**: code chunk embedding text prepended with `[DEFINES]`, `[IMPORTS]`, `[EXPORTS]` from tree-sitter analysis
+- **Call graph resolution**: 3-level — same-file function lookup → import tracing → fuzzy method name match
+- **Mermaid diagram generation**: 4 generators (architecture, callgraph, commits, PRs) with Mermaid syntax safety (reserved keyword handling, dangling edge guards)
 - **Directory scoping**: large repo queries prioritize results near the active editor file; prevents irrelevant far-away code from dominating results
 
 ---
@@ -248,46 +252,60 @@ gitlore/
 
 ---
 
-## v3 — AST Analysis, Call Graphs & Mermaid Diagrams
+## v3 — AST Analysis, Call Graphs & Mermaid Diagrams ✅
 
 ### Goal
 Add a **tree-sitter-based static analysis layer** that extracts AST metadata (imports, exports, functions, classes, call sites) per file, builds a full transitive call graph, stores structural edges in a new LanceDB table, enriches code chunk embeddings, and powers new CLI commands that output **Mermaid diagrams** for codebase architecture, commit history, and PR/issue context.
 
-### Phase 14: Tree-Sitter AST Extraction Service
-- [ ] Add `web-tree-sitter` dependency to @gitlore/core
-- [ ] Grammar WASM files lazy-downloaded on first use and cached (CLI: `~/.gitlore/grammars/`, VS Code: `globalStorageUri`)
-- [ ] Supported grammars: TypeScript, TSX, JavaScript, Python, Go, Rust, Java, C, C++
-- [ ] New `ASTService` class: `init()`, `parseFile(filePath, content, language) → FileSymbols`
-- [ ] S-expression queries: function/class declarations, call expressions, import/export statements
-- [ ] New types: `FileSymbols`, `SymbolInfo`, `CallSite`, `ImportInfo`, `ExportInfo`
+### Phase 14: Tree-Sitter AST Extraction Service ✅
+- [x] Add `web-tree-sitter` dependency to @gitlore/core
+- [x] Grammar WASM files lazy-downloaded on first use and cached (CLI: `~/.gitlore/grammars/`, VS Code: `globalStorageUri`)
+- [x] Supported grammars: TypeScript, TSX, JavaScript, Python, Go, Rust, Java, C, C++
+- [x] Grammar WASMs fetched from official tree-sitter GitHub release URLs per language (verified versions)
+- [x] Separate TS and JS queries — `type_identifier` for TS classes, `identifier` for JS classes
+- [x] `failedLanguages` cache prevents error spam (logs once per language, not per file)
+- [x] New `ASTService` class: `init()`, `parseFile(filePath, content, language) → FileSymbols`
+- [x] S-expression queries: function/class declarations, call expressions, import/export statements
+- [x] New types: `FileSymbols`, `SymbolInfo`, `CallSite`, `ImportInfo`, `ExportInfo`
 
-### Phase 15: Call Graph Builder
-- [ ] New `CallGraphService` class: `buildGraph(allSymbols) → CallEdge[]`
-- [ ] Resolution: same-file lookup → import tracing → fuzzy method name match
-- [ ] `getTransitiveClosure(entry) → BFS all reachable functions`
-- [ ] `getCallers(function) → reverse edges`
-- [ ] New `call_graph` LanceDB table (relational — no vector column): callerFile, callerName, calleeFile, calleeName, line
-- [ ] VectorStore: `createCallGraphTable()`, `upsertCallGraph()`, `queryCallGraph()`
+### Phase 15: Call Graph Builder ✅
+- [x] New `CallGraphService` class: `buildGraph(allSymbols) → CallEdge[]`
+- [x] Resolution: same-file lookup → import tracing → fuzzy method name match
+- [x] `getTransitiveClosure(entry) → BFS all reachable functions`
+- [x] `getCallers(function) → reverse edges`
+- [x] New `call_graph` LanceDB table (relational — no vector column): callerFile, callerName, calleeFile, calleeName, line
+- [x] VectorStore: `createCallGraphTable()`, `upsertCallGraph()`, `queryCallGraph()`
 
-### Phase 16: Enrich Code Chunks with AST Metadata
-- [ ] Extend `CodeChunk` with optional: `functions?`, `classes?`, `imports?`, `exports?`
-- [ ] Update `CodeIndexer.chunkFile()` — parse full file via ASTService, tag each chunk with intersecting symbols
-- [ ] Update `CodeIndexer.toEmbeddingText()` — prepend `[DEFINES]`, `[IMPORTS]`, `[EXPORTS]` metadata
-- [ ] Extend `code_files` table schema with nullable metadata columns (backward-compatible)
+### Phase 16: Enrich Code Chunks with AST Metadata ✅
+- [x] Extend `CodeChunk` with optional: `functions?`, `classes?`, `imports?`, `exports?`
+- [x] Update `CodeIndexer.chunkFile()` — parse full file via ASTService, tag each chunk with intersecting symbols
+- [x] Update `CodeIndexer.toEmbeddingText()` — prepend `[DEFINES]`, `[IMPORTS]`, `[EXPORTS]` metadata
+- [x] Extend `code_files` table schema with nullable metadata columns (backward-compatible)
 
-### Phase 17: Mermaid Diagram CLI Commands
-- [ ] New `MermaidService`: `generateCodeArchitecture()`, `generateCallGraph()`, `generateCommitTimeline()`, `generatePRIssueFlow()`
-- [ ] CLI commands: `gitlore diagram architecture`, `gitlore diagram callgraph [--entry <fn>]`, `gitlore diagram commits [--limit <n>]`, `gitlore diagram prs`
-- [ ] All output Mermaid syntax to stdout (pipeable)
+### Phase 17: Mermaid Diagram CLI Commands ✅
+- [x] New `MermaidService`: `generateCodeArchitecture()`, `generateCallGraph()`, `generateCommitTimeline()`, `generatePRIssueFlow()`
+- [x] CLI commands: `gitlore diagram architecture`, `gitlore diagram callgraph [--entry <fn>]`, `gitlore diagram commits [--limit <n>]`, `gitlore diagram prs`
+- [x] All output Mermaid syntax to stdout (pipeable)
+- [x] Mermaid syntax fixes: root subgraph `.` → `root["root"]`, reserved keyword `external` → `ext_fns`, dangling edge guard (only emit edges where both endpoints declared)
 
-### Phase 18: Structural Context in RAG Query
-- [ ] Update `RAGEngine.query()` — fetch FileSymbols for expanded files, build structural context section
-- [ ] Update `buildPrompt()` — accept optional `structuralContext` parameter, insert between code and file tree
-- [ ] Update system prompt DATA TYPES — add `[STRUCTURE]` description
+### Phase 18: Structural Context in RAG Query ✅
+- [x] Update `RAGEngine.query()` — fetch FileSymbols for expanded files, build structural context section
+- [x] Update `buildPrompt()` — accept optional `structuralContext` parameter, insert between code and file tree
+- [x] Update system prompt DATA TYPES — add `[STRUCTURE]` description
 
 ### Key Decisions (v3)
 - **web-tree-sitter** over native tree-sitter: avoids node-gyp, works in VS Code WASM sandbox. Slower parsing acceptable for indexing.
+- **Official tree-sitter GitHub releases** for grammar WASMs — per-language URLs verified against actual release pages (e.g., typescript v0.23.2, javascript v0.25.0, python v0.25.0)
+- **Separate TS/JS queries**: TypeScript uses `type_identifier` for class names; JavaScript uses `identifier` (no `type_identifier` in JS grammar)
 - **Call graph in separate table** (no vectors): edges are relational, not semantic.
 - **Mermaid to stdout**: pipeable, no rendering dependency.
 - **Full transitive closure at query time via BFS**: keeps storage small, always fresh.
 - **AST metadata is additive**: nullable columns, no forced reindex of existing data.
+- **`failedLanguages` caching**: download/query failures cached per language — logs once, then silently skips remaining files of that language
+
+### Post-v3 Refinements ✅
+- [x] `mergedBy` field added to PRChunk, GitHubService, and VectorStore — tracks who merged each PR
+- [x] RAG budget tuned: `MAX_PROMPT_CHARS` 24K→60K, `EXPAND_FILES` 3→5, `MAX_EXPAND_CHARS` 3K→6K, default `topK`→10
+- [x] Added `--top-k` flag to CLI `query` command (configurable retrieval depth)
+- [x] LanceDB path mismatch fixed in diagram commits/prs commands (`lancedb` → `db`)
+- [x] Tested live on Express repo: 12,889 commits, 275 code chunks, 2,443 PRs, 141 AST-parseable files, 11,404 call graph edges
