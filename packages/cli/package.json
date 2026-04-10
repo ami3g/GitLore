@@ -1,0 +1,22 @@
+{
+  "name": "@gitlore/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI interface for GitLore — chat with your Git history from the terminal.",
+  "main": "./dist/index.js",
+  "bin": {
+    "gitlore": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@gitlore/core": "*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^20.11.0"
+  }
+}

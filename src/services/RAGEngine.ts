@@ -24,7 +24,7 @@ CONVERSATION CONTEXT: Use the provided conversation history for continuity, but 
 TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
 
 // Rough character budget — ~4 chars per token, leave room for the response
-const MAX_PROMPT_CHARS = 24000; // ~6K tokens, safe for gpt-4o-mini (128K) and smaller Ollama models (8K)
+const MAX_PROMPT_CHARS = 24000; // ~6K tokens, safe for gpt-4o (128K) and smaller Ollama models (8K)
 
 export class RAGEngine {
   private context: vscode.ExtensionContext;
@@ -99,33 +99,37 @@ export class RAGEngine {
     }
 
     if (doFullIndex) {
-      // ─── Full index (streamed in windows to limit memory) ───
+      // ─── Full index (truly streaming: page → embed → write → discard) ───
       onProgress?.('Initializing Git processor', 0, commitDepth);
-      const allChunks = await gitProcessor.extractAndChunk(commitDepth, onProgress);
 
-      if (allChunks.length === 0) {
-        throw new Error('No commits found in this repository.');
+      const PAGE_SIZE = 200;   // commits per git-log page
+      const WINDOW = 100;      // chunks per embed+write cycle
+      let totalWritten = 0;
+      let isFirstWrite = true;
+
+      for await (const pageChunks of gitProcessor.extractPaged(commitDepth, PAGE_SIZE, onProgress)) {
+        // Process each page in WINDOW-sized sub-batches
+        for (let i = 0; i < pageChunks.length; i += WINDOW) {
+          const window = pageChunks.slice(i, i + WINDOW);
+          const texts = window.map((c) => gitProcessor.toEmbeddingText(c));
+          const embeddings = await embedding.embedBatch(texts, (phase, cur, _tot) => {
+            onProgress?.(phase, totalWritten + i + cur, commitDepth);
+          });
+
+          if (isFirstWrite) {
+            onProgress?.('Storing in vector database', 0, commitDepth);
+            await store.createTable(window, embeddings);
+            isFirstWrite = false;
+          } else {
+            await store.addRecords(window, embeddings);
+          }
+          totalWritten += window.length;
+        }
+        // pageChunks is now eligible for GC — no accumulation
       }
 
-      const WINDOW = 100;
-      let totalWritten = 0;
-
-      for (let i = 0; i < allChunks.length; i += WINDOW) {
-        const window = allChunks.slice(i, i + WINDOW);
-        const texts = window.map((c) => gitProcessor.toEmbeddingText(c));
-        const embeddings = await embedding.embedBatch(texts, (phase, cur, tot) => {
-          onProgress?.(phase, i + cur, allChunks.length);
-        });
-
-        if (i === 0) {
-          // First window — create the table
-          onProgress?.('Storing in vector database', 0, allChunks.length);
-          await store.createTable(window, embeddings);
-        } else {
-          // Subsequent windows — append
-          await store.addRecords(window, embeddings);
-        }
-        totalWritten += window.length;
+      if (totalWritten === 0) {
+        throw new Error('No commits found in this repository.');
       }
 
       // Save metadata for future incremental runs
@@ -179,7 +183,7 @@ export class RAGEngine {
   async getStatus(): Promise<IndexStatus> {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
-      return { indexed: false, commitCount: 0, lastIndexedAt: null };
+      return { indexed: false, commitCount: 0, lastIndexedAt: null, lastIndexedHash: null };
     }
 
     const storePath = this.getStorePath(workspaceFolder.uri.fsPath);
@@ -348,7 +352,7 @@ export class RAGEngine {
     const providerType = config.get<string>('llmProvider', 'ollama');
 
     if (providerType === 'openai') {
-      const model = config.get<string>('openaiModel', 'gpt-4o-mini');
+      const model = config.get<string>('openaiModel', 'gpt-4o');
       this.llmProvider = new OpenAIProvider(
         model,
         async () => {

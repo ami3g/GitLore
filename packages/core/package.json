@@ -1,0 +1,24 @@
+{
+  "name": "@gitlore/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework-agnostic RAG engine for Git history, code files, and PR/issue context.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.1",
+    "@lancedb/lancedb": "^0.13.0",
+    "@octokit/rest": "^22.0.1",
+    "apache-arrow": "^17.0.0",
+    "openai": "^4.77.0",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

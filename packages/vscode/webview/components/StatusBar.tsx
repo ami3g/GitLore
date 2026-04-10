@@ -1,0 +1,52 @@
+import React from 'react';
+import type { IndexStatus } from '@gitlore/core';
+
+interface StatusBarProps {
+  status: IndexStatus;
+  isIndexing: boolean;
+  indexProgress: string;
+  onIndex: () => void;
+  onSummarize: () => void;
+}
+
+export const StatusBar: React.FC<StatusBarProps> = ({
+  status,
+  isIndexing,
+  indexProgress,
+  onIndex,
+  onSummarize,
+}) => {
+  return (
+    <div className="status-bar">
+      <div className="status-bar__info">
+        <span className={`status-bar__dot ${status.indexed ? 'status-bar__dot--active' : ''}`} />
+        {isIndexing ? (
+          <span className="status-bar__text">{indexProgress}</span>
+        ) : status.indexed ? (
+          <span className="status-bar__text">
+            {status.commitCount} chunks indexed
+          </span>
+        ) : (
+          <span className="status-bar__text">Not indexed</span>
+        )}
+      </div>
+      <div className="status-bar__actions">
+        {status.indexed && !isIndexing && (
+          <button
+            className="status-bar__button status-bar__button--secondary"
+            onClick={onSummarize}
+          >
+            What's Changed?
+          </button>
+        )}
+        <button
+          className="status-bar__button"
+          onClick={onIndex}
+          disabled={isIndexing}
+        >
+          {isIndexing ? 'Indexing...' : status.indexed ? 'Re-index' : 'Index Repo'}
+        </button>
+      </div>
+    </div>
+  );
+};
