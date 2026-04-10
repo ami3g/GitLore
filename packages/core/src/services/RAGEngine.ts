@@ -173,6 +173,11 @@ export class RAGEngine {
 
     onProgress?.('Scanning code files', 0, 0);
 
+    // Initialize AST service for symbol metadata tagging
+    const grammarDir = path.join(os.homedir(), '.gitlore', 'grammars');
+    const ast = new ASTService(grammarDir);
+    await ast.init();
+
     // Find deleted files and remove their records
     const deletedFiles = await codeIndexer.getDeletedFiles(storePath);
     if (deletedFiles.length > 0) {
@@ -181,7 +186,8 @@ export class RAGEngine {
     }
 
     // Index changed/new files — hierarchical mode adds file summaries for large repos
-    const { chunks, meta, changedFiles } = await codeIndexer.indexAll(storePath, onProgress, hierarchical);
+    // AST service tags each chunk with functions/classes/imports/exports metadata
+    const { chunks, meta, changedFiles } = await codeIndexer.indexAll(storePath, onProgress, hierarchical, ast);
 
     if (chunks.length === 0) {
       // No changes — just save updated meta
@@ -228,8 +234,9 @@ export class RAGEngine {
     onProgress?.(label, 1, 1);
 
     // ─── Build Call Graph (static + co-change edges) ───
-    await this.buildCallGraph(repoPath, codeIndexer, store, onProgress);
+    await this.buildCallGraph(repoPath, codeIndexer, store, onProgress, ast);
 
+    ast.dispose();
     return { changedFiles: changedFiles.length, totalChunks: chunks.length };
   }
 
@@ -883,15 +890,15 @@ export class RAGEngine {
     repoPath: string,
     codeIndexer: CodeIndexer,
     store: VectorStore,
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    existingAst?: ASTService
   ): Promise<void> {
     try {
       onProgress?.('Building call graph (AST analysis)', 0, 0);
 
-      // 1. Initialize AST service
-      const grammarDir = path.join(os.homedir(), '.gitlore', 'grammars');
-      const ast = new ASTService(grammarDir);
-      await ast.init();
+      // 1. Initialize AST service (reuse if provided by caller)
+      const ast = existingAst ?? new ASTService(path.join(os.homedir(), '.gitlore', 'grammars'));
+      if (!existingAst) await ast.init();
 
       // 2. Read all code files for parsing
       const files = await codeIndexer.listFiles();
@@ -918,7 +925,7 @@ export class RAGEngine {
 
       onProgress?.(`Parsing ${fileContents.length} files for AST`, 0, fileContents.length);
       const allSymbols = await ast.parseFiles(fileContents);
-      ast.dispose();
+      if (!existingAst) ast.dispose();
 
       // 3. Build static call graph edges
       const cg = new CallGraphService();

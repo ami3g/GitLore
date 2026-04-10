@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { CodeChunk } from '../types';
 import type { FileSymbols } from '../types';
+import type { ASTService } from './ASTService';
 import type { ProgressCallback } from './GitProcessor';
 
 // ─── Chunk Settings ───
@@ -213,7 +214,8 @@ export class CodeIndexer {
   async indexAll(
     storePath: string,
     onProgress?: ProgressCallback,
-    hierarchical = false
+    hierarchical = false,
+    astService?: ASTService
   ): Promise<{ chunks: CodeChunk[]; meta: CodeMeta; changedFiles: string[] }> {
     const previousMeta = this.loadMeta(storePath);
     const previousHashes = previousMeta?.fileHashes ?? {};
@@ -244,7 +246,19 @@ export class CodeIndexer {
       }
 
       changedFiles.push(relPath);
-      const { chunks } = this.chunkFile(relPath, content, hierarchical);
+
+      // Parse AST for symbol metadata when ASTService is available
+      let fileSymbols: FileSymbols | undefined;
+      if (astService) {
+        const ext = extOf(relPath);
+        const language = LANG_MAP[ext];
+        if (language) {
+          const parsed = await astService.parseFile(relPath, content, language);
+          if (parsed) fileSymbols = parsed;
+        }
+      }
+
+      const { chunks } = this.chunkFile(relPath, content, hierarchical, fileSymbols);
       allChunks.push(...chunks);
     }
 
