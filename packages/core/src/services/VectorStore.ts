@@ -236,18 +236,25 @@ export class VectorStore {
       }
       const results = await query.toArray();
 
-      return results.map((row: Record<string, unknown>) => ({
+    return results.map((row: Record<string, unknown>) => {
+      const chunk: import('../types').CodeChunk = {
+        filePath: row['filePath'] as string,
+        language: row['language'] as string,
+        startLine: row['startLine'] as number,
+        endLine: row['endLine'] as number,
+        content: row['content'] as string,
+        isSummary: (row['isSummary'] as number) === 1,
+      };
+      try { const v = JSON.parse((row['functions'] as string) || '[]'); if (v.length) chunk.functions = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['classes'] as string) || '[]'); if (v.length) chunk.classes = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['imports'] as string) || '[]'); if (v.length) chunk.imports = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['exports'] as string) || '[]'); if (v.length) chunk.exports = v; } catch { /* old index */ }
+      return {
         type: 'code' as const,
-        chunk: {
-          filePath: row['filePath'] as string,
-          language: row['language'] as string,
-          startLine: row['startLine'] as number,
-          endLine: row['endLine'] as number,
-          content: row['content'] as string,
-          isSummary: (row['isSummary'] as number) === 1,
-        },
+        chunk,
         score: row['_distance'] as number,
-      }));
+      };
+    });
     } catch {
       // Fallback: if the WHERE clause fails (e.g. old index without AST metadata),
       // return empty — regular code search will still work
@@ -465,18 +472,21 @@ export class VectorStore {
     }
     const results = await query.toArray();
 
-    return results.map((row: Record<string, unknown>) => ({
-      type: 'code' as const,
-      chunk: {
+    return results.map((row: Record<string, unknown>) => {
+      const chunk: import('../types').CodeChunk = {
         filePath: row['filePath'] as string,
         language: row['language'] as string,
         startLine: row['startLine'] as number,
         endLine: row['endLine'] as number,
         content: row['content'] as string,
         isSummary: (row['isSummary'] as number) === 1,
-      },
-      score: row['_distance'] as number,
-    }));
+      };
+      try { const v = JSON.parse((row['functions'] as string) || '[]'); if (v.length) chunk.functions = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['classes'] as string) || '[]'); if (v.length) chunk.classes = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['imports'] as string) || '[]'); if (v.length) chunk.imports = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['exports'] as string) || '[]'); if (v.length) chunk.exports = v; } catch { /* old index */ }
+      return { type: 'code' as const, chunk, score: row['_distance'] as number };
+    });
   }
 
   /**
@@ -504,18 +514,21 @@ export class VectorStore {
     }
     const results = await query.toArray();
 
-    return results.map((row: Record<string, unknown>) => ({
-      type: 'code' as const,
-      chunk: {
+    return results.map((row: Record<string, unknown>) => {
+      const chunk: import('../types').CodeChunk = {
         filePath: row['filePath'] as string,
         language: row['language'] as string,
         startLine: row['startLine'] as number,
         endLine: row['endLine'] as number,
         content: row['content'] as string,
         isSummary: (row['isSummary'] as number) === 1,
-      },
-      score: row['_distance'] as number,
-    }));
+      };
+      try { const v = JSON.parse((row['functions'] as string) || '[]'); if (v.length) chunk.functions = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['classes'] as string) || '[]'); if (v.length) chunk.classes = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['imports'] as string) || '[]'); if (v.length) chunk.imports = v; } catch { /* old index */ }
+      try { const v = JSON.parse((row['exports'] as string) || '[]'); if (v.length) chunk.exports = v; } catch { /* old index */ }
+      return { type: 'code' as const, chunk, score: row['_distance'] as number };
+    });
   }
 
   async isCodeIndexed(): Promise<boolean> {
