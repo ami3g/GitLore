@@ -547,7 +547,7 @@ export class VectorStore {
     if (!table || filePaths.length === 0) return [];
 
     const conditions = filePaths
-      .map((fp) => `"filePath" = '${fp.replace(/'/g, "''")}'`)
+      .map((fp) => `filePath = '${fp.replace(/'/g, "''")}'`)
       .join(' OR ');
 
     const rows: Record<string, unknown>[] = await table

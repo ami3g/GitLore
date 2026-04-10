@@ -579,6 +579,9 @@ export class RAGEngine {
     if (mentionedFiles.length > 0) {
       const allIndexedPaths = await store.getAllUniqueFilePaths();
       console.error(`[RAGEngine] Step 4c: ${allIndexedPaths.length} indexed paths, resolving ${mentionedFiles.length} mentioned files`);
+      console.error(`[RAGEngine] Step 4c sample paths: [${allIndexedPaths.slice(0, 8).join(', ')}]`);
+      const routerHits = allIndexedPaths.filter(p => p.includes('router'));
+      if (routerHits.length) console.error(`[RAGEngine] Step 4c router paths: [${routerHits.join(', ')}]`);
       for (const mf of mentionedFiles) {
         const match = allIndexedPaths.find(kp => kp === mf || kp.endsWith('/' + mf) || kp.endsWith('\\' + mf));
         console.error(`[RAGEngine] Step 4c: "${mf}" → ${match ? `matched "${match}"` : 'NO MATCH'} (seenFiles.has=${match ? seenFiles.has(match) : 'N/A'})`);
