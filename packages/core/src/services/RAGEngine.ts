@@ -453,9 +453,9 @@ export class RAGEngine {
     // query and boost code chunks whose function lists contain them — even nested functions
     // that aren't top-level exports. This ensures e.g. "How does next() work?" surfaces
     // the file containing the core iterator loop.
+    const querySymbols: string[] = [];
     if (weights.distribution.implementation > 0.4) {
       const symbolPattern = /\b([a-zA-Z_$][\w$]*)\s*\(/g;
-      const querySymbols: string[] = [];
       let m: RegExpExecArray | null;
       while ((m = symbolPattern.exec(question)) !== null) {
         querySymbols.push(m[1].toLowerCase());
@@ -486,7 +486,7 @@ export class RAGEngine {
     //   - Chunks that weren't hits → collapse to a 1-line skeleton with symbol names
     // This means the LLM sees the whole file structure but only the relevant details.
     const EXPAND_FILES = (weights.intent === 'historical' || weights.intent === 'debugging') ? 3 : 5;
-    const MAX_EXPAND_CHARS = 12000; // safety cap for truly massive files (after collapsing)
+    const MAX_EXPAND_CHARS = 18000; // raised to accommodate contextual expansion of parent functions
 
     // Track which chunks were actually hit by vector search for each file
     const hitChunkKeys = new Set<string>();
@@ -545,10 +545,55 @@ export class RAGEngine {
           .sort((a, b) => a.startLine - b.startLine);
         if (fileChunks.length === 0) continue;
 
+        // ─── Contextual Expansion ───
+        // For trace queries: if a chunk contains a queried symbol (e.g. next) as a
+        // nested function, find the parent function that spans it and force-expand
+        // ALL chunks belonging to the parent. This ensures the LLM sees the entire
+        // loop + closure together, not just the small chunk where next is defined.
+        const contextExpandedKeys = new Set<string>();
+        if (querySymbols.length > 0) {
+          for (let ci = 0; ci < fileChunks.length; ci++) {
+            const chunk = fileChunks[ci];
+            const fns = (chunk.functions || []).map(f => f.toLowerCase());
+            // Does this chunk contain any queried symbol?
+            const hasSymbol = querySymbols.some(sym => fns.some(f => f === sym || f.includes(sym)));
+            if (!hasSymbol) continue;
+
+            // Find the parent function: the outermost function in this chunk that
+            // isn't the symbol itself. For expressjs, next() is inside proto.handle —
+            // so `fns` would be ['handle', 'next'] and parent = 'handle'.
+            const parentFn = fns.find(f => !querySymbols.some(sym => f === sym || f.includes(sym))) || fns[0];
+
+            // Mark this chunk as force-expanded
+            contextExpandedKeys.add(`${chunk.filePath}:${chunk.startLine}`);
+
+            // Walk backward: expand preceding chunks that share the parent function
+            for (let bi = ci - 1; bi >= 0; bi--) {
+              const prev = fileChunks[bi];
+              const prevFns = (prev.functions || []).map(f => f.toLowerCase());
+              if (prevFns.some(f => f === parentFn || f.includes(parentFn))) {
+                contextExpandedKeys.add(`${prev.filePath}:${prev.startLine}`);
+              } else {
+                break; // parent function no longer present → stop walking
+              }
+            }
+            // Walk forward: expand following chunks that share the parent function
+            for (let fi = ci + 1; fi < fileChunks.length; fi++) {
+              const next = fileChunks[fi];
+              const nextFns = (next.functions || []).map(f => f.toLowerCase());
+              if (nextFns.some(f => f === parentFn || f.includes(parentFn))) {
+                contextExpandedKeys.add(`${next.filePath}:${next.startLine}`);
+              } else {
+                break;
+              }
+            }
+          }
+        }
+
         const parts: string[] = [];
         for (const chunk of fileChunks) {
           const key = `${chunk.filePath}:${chunk.startLine}`;
-          const isHit = hitChunkKeys.has(key);
+          const isHit = hitChunkKeys.has(key) || contextExpandedKeys.has(key);
 
           if (isHit) {
             // Hit chunk → full content
