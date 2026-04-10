@@ -1,14 +1,19 @@
 // ─── Intent-Based Query Router ───
-// Lightweight keyword classifier that detects query intent and produces
-// per-source-type weight multipliers for reranking search results.
+// Soft-max distribution classifier: instead of picking one winning intent,
+// outputs a weight for every intent and blends per-source-type multipliers
+// proportionally. A query that is 49% historical + 51% implementation will
+// get meaningful context from both PRs/commits AND code.
 
 export type QueryIntent = 'overview' | 'historical' | 'implementation' | 'debugging' | 'general';
 
 export interface IntentWeights {
+  /** The dominant intent (for logging / intent-specific features) */
   intent: QueryIntent;
   commit: number;
   code: number;
   pr: number;
+  /** Raw soft-max distribution across all intents (sums to ~1.0) */
+  distribution: Record<QueryIntent, number>;
 }
 
 // ─── Keyword dictionaries (lowercase, checked via word-boundary regex) ───
@@ -61,12 +66,37 @@ function countMatches(text: string, pattern: RegExp): number {
   return matches ? matches.length : 0;
 }
 
+// ─── Per-intent weight profiles (what each intent "wants" from each table) ───
+const INTENT_PROFILES: Record<QueryIntent, { commit: number; code: number; pr: number }> = {
+  overview:       { commit: 0.6, code: 1.8, pr: 0.7 },
+  historical:     { commit: 1.2, code: 0.8, pr: 1.5 },
+  implementation: { commit: 0.8, code: 1.5, pr: 0.9 },
+  debugging:      { commit: 1.5, code: 1.2, pr: 0.7 },
+  general:        { commit: 1.0, code: 1.0, pr: 1.0 },
+};
+
 /**
- * Classify a user query into an intent and return per-table weight multipliers.
+ * Soft-max over raw match counts → probability distribution.
+ * Temperature controls sharpness: lower = more peaked, higher = more uniform.
+ */
+function softmax(scores: number[], temperature = 1.5): number[] {
+  const scaled = scores.map((s) => s / temperature);
+  const max = Math.max(...scaled);
+  const exps = scaled.map((s) => Math.exp(s - max)); // subtract max for numerical stability
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map((e) => e / sum);
+}
+
+/**
+ * Classify a user query into a soft-max distribution over all intents,
+ * then blend per-table weight multipliers proportionally.
+ *
+ * A query with 40% historical + 50% implementation + 10% general will
+ * produce blended weights that serve both intents well, rather than
+ * discarding the 40% historical signal.
  *
  * Lower distance = better in LanceDB, so we *divide* by the weight rather
  * than multiply — e.g. a 1.5x boost on PR means: dividedScore = rawScore / 1.5
- * This is equivalent to making PR results "closer" in vector space.
  */
 export function classifyIntent(query: string): IntentWeights {
   const overviewCount = countMatches(query, OVERVIEW_RE);
@@ -74,50 +104,43 @@ export function classifyIntent(query: string): IntentWeights {
   const implCount = countMatches(query, IMPLEMENTATION_RE);
   const debugCount = countMatches(query, DEBUGGING_RE);
 
+  const rawScores = [overviewCount, histCount, implCount, debugCount, 0];
+  const intentNames: QueryIntent[] = ['overview', 'historical', 'implementation', 'debugging', 'general'];
+
   const maxCount = Math.max(overviewCount, histCount, implCount, debugCount);
 
-  // No strong signal → general balanced query
+  // No strong signal → pure general (uniform)
   if (maxCount === 0) {
-    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0 };
+    const dist: Record<QueryIntent, number> = { overview: 0, historical: 0, implementation: 0, debugging: 0, general: 1.0 };
+    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0, distribution: dist };
   }
 
-  // Overview: "what is this project", "what are the features"
-  // → Current code (README, docs, config) is the source of truth
-  if (overviewCount >= histCount && overviewCount >= implCount && overviewCount >= debugCount) {
-    return {
-      intent: 'overview',
-      commit: 0.6,    // commits are historical noise for "current state" questions
-      code: 1.8,      // README, package.json, entry files describe the project best
-      pr: 0.7,
-    };
+  // Give 'general' a small base score (acts as smoothing / floor)
+  rawScores[4] = maxCount * 0.15;
+
+  const probs = softmax(rawScores);
+  const distribution = {} as Record<QueryIntent, number>;
+  for (let i = 0; i < intentNames.length; i++) {
+    distribution[intentNames[i]] = probs[i];
   }
 
-  // Winner-takes-all with proportional boosting
-  if (histCount >= implCount && histCount >= debugCount) {
-    return {
-      intent: 'historical',
-      commit: 1.2,
-      code: 0.8,
-      pr: 1.5,       // PR context is most valuable for "why" questions
-    };
+  // Dominant intent = highest probability
+  let dominantIdx = 0;
+  for (let i = 1; i < probs.length; i++) {
+    if (probs[i] > probs[dominantIdx]) dominantIdx = i;
+  }
+  const intent = intentNames[dominantIdx];
+
+  // Blend weights: weighted sum of each intent's profile by its probability
+  let commit = 0, code = 0, pr = 0;
+  for (let i = 0; i < intentNames.length; i++) {
+    const profile = INTENT_PROFILES[intentNames[i]];
+    commit += probs[i] * profile.commit;
+    code += probs[i] * profile.code;
+    pr += probs[i] * profile.pr;
   }
 
-  if (implCount >= histCount && implCount >= debugCount) {
-    return {
-      intent: 'implementation',
-      commit: 0.8,
-      code: 1.5,     // Current code is most valuable for "how" questions
-      pr: 0.9,
-    };
-  }
-
-  // debugCount wins
-  return {
-    intent: 'debugging',
-    commit: 1.5,      // Commits show what changed and when it broke
-    code: 1.2,
-    pr: 0.7,
-  };
+  return { intent, commit, code, pr, distribution };
 }
 
 import type { SearchResult } from '../types';

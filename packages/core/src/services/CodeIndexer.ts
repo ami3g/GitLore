@@ -9,9 +9,18 @@ import type { ProgressCallback } from './GitProcessor';
 // ─── Chunk Settings ───
 const CHUNK_LINES = 256;
 const OVERLAP_LINES = 50;
+/** Large chunk size for documentation files (README, CONTRIBUTING, ARCHITECTURE, etc.) */
+const DOC_CHUNK_LINES = 1024;
+const DOC_OVERLAP_LINES = 100;
 /** Lines from head/tail used to build a file-level summary for large repos */
 const SUMMARY_HEAD_LINES = 80;
 const SUMMARY_TAIL_LINES = 40;
+
+/**
+ * Documentation files that should use the larger chunk window (DOC_CHUNK_LINES)
+ * or no chunking at all. Matched case-insensitively against the file basename.
+ */
+const DOC_FILE_PATTERNS = /^(readme|contributing|architecture|changelog|history|authors|license|code.of.conduct)/i;
 
 // ─── Language Detection ───
 const LANG_MAP: Record<string, string> = {
@@ -115,8 +124,14 @@ export class CodeIndexer {
     const ext = extOf(filePath);
     const language = LANG_MAP[ext] ?? 'unknown';
 
+    // Detect documentation files → use larger chunk window or no chunking
+    const basename = (filePath.split('/').pop() ?? filePath).replace(/\.[^.]+$/, '');
+    const isDocFile = DOC_FILE_PATTERNS.test(basename);
+    const chunkSize = isDocFile ? DOC_CHUNK_LINES : CHUNK_LINES;
+    const overlapSize = isDocFile ? DOC_OVERLAP_LINES : OVERLAP_LINES;
+
     // Hierarchical: add a summary chunk for large repos
-    if (hierarchical && lines.length > CHUNK_LINES) {
+    if (hierarchical && lines.length > chunkSize) {
       const summaryContent = this.buildFileSummary(filePath, lines, language);
       chunks.push({
         filePath,
@@ -128,8 +143,23 @@ export class CodeIndexer {
       });
     }
 
-    for (let start = 0; start < lines.length; start += CHUNK_LINES - OVERLAP_LINES) {
-      const end = Math.min(start + CHUNK_LINES, lines.length);
+    // Doc files under the chunk limit → emit as a single chunk (no splitting)
+    if (isDocFile && lines.length <= chunkSize) {
+      const chunkContent = lines.join('\n');
+      if (chunkContent.replace(/\s/g, '').length >= 20) {
+        chunks.push({
+          filePath,
+          language,
+          startLine: 1,
+          endLine: lines.length,
+          content: chunkContent,
+        });
+      }
+      return { chunks, contentHash };
+    }
+
+    for (let start = 0; start < lines.length; start += chunkSize - overlapSize) {
+      const end = Math.min(start + chunkSize, lines.length);
       const chunkContent = lines.slice(start, end).join('\n');
 
       // Skip nearly-empty chunks (< 3 non-blank lines)

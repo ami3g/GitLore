@@ -368,6 +368,32 @@ export class RAGEngine {
       codeResults = await store.searchCode(queryVector, codeTopK);
     }
 
+    // ─── 2b. AST metadata boosting for implementation intent ───
+    // When the implementation distribution is high (>0.4), search specifically for
+    // chunks tagged with [DEFINES]/[EXPORTS] so the LLM sees module interfaces first.
+    if (weights.distribution.implementation > 0.4) {
+      const astTopK = Math.ceil(codeTopK * 0.3);
+      const astResults = await store.searchCodeWithAST(queryVector, astTopK);
+      if (astResults.length > 0) {
+        // Boost AST-tagged results by lowering their score (lower = better)
+        for (const r of astResults) {
+          r.score *= 0.7; // 30% boost for structural chunks
+        }
+        // Deduplicate: only add AST results not already in codeResults
+        const existingKeys = new Set(
+          codeResults.map((r) => r.type === 'code' ? `${r.chunk.filePath}:${r.chunk.startLine}` : '')
+        );
+        for (const r of astResults) {
+          if (r.type !== 'code') continue;
+          const key = `${r.chunk.filePath}:${r.chunk.startLine}`;
+          if (!existingKeys.has(key)) {
+            codeResults.push(r);
+            existingKeys.add(key);
+          }
+        }
+      }
+    }
+
     // ─── 3. Rerank with intent weights ───
     const allCandidates = rerank(
       [...commitResults, ...codeResults, ...prResults],
@@ -382,6 +408,36 @@ export class RAGEngine {
           r.score *= 0.5;
         }
       }
+      allCandidates.sort((a, b) => a.score - b.score);
+    }
+
+    // ─── 3b. Historical temporal chain: PR → linked commits ───
+    // When historical intent is significant, find PRs in results and pull their
+    // merge commits from the commit table — regardless of vector score.
+    if (weights.distribution.historical > 0.3) {
+      const prCandidates = allCandidates.filter((r): r is import('../types').PRSearchResult => r.type === 'pr');
+      const existingHashes = new Set(
+        allCandidates
+          .filter((r): r is import('../types').CommitSearchResult => r.type === 'commit')
+          .map((r) => r.chunk.hash)
+      );
+
+      for (const prResult of prCandidates.slice(0, 3)) {
+        const mergeHash = prResult.chunk.resolvedBy;
+        if (!mergeHash || existingHashes.has(mergeHash)) continue;
+
+        const linkedCommits = await store.searchCommitsByHash(mergeHash);
+        for (const lc of linkedCommits) {
+          if (lc.type !== 'commit') continue;
+          if (!existingHashes.has(lc.chunk.hash)) {
+            // Give linked commits a score just below the PR that found them
+            lc.score = prResult.score * 1.05;
+            allCandidates.push(lc);
+            existingHashes.add(lc.chunk.hash);
+          }
+        }
+      }
+      // Re-sort after injecting temporal chain commits
       allCandidates.sort((a, b) => a.score - b.score);
     }
 

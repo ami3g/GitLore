@@ -179,6 +179,78 @@ export class VectorStore {
     }));
   }
 
+  /**
+   * Fetch commits by merge commit SHA hash (for temporal chain: PR → linked commits).
+   * Searches the commit table for rows where the hash starts with the given prefix.
+   */
+  async searchCommitsByHash(hashPrefix: string): Promise<SearchResult[]> {
+    const table = await this.getCommitTable();
+    if (!table || !hashPrefix) return [];
+
+    try {
+      const escaped = hashPrefix.replace(/'/g, "''");
+      const results = await table
+        .query()
+        .where(`hash LIKE '${escaped}%'`)
+        .toArray();
+
+      return results.map((row: Record<string, unknown>) => ({
+        type: 'commit' as const,
+        chunk: {
+          hash: row['hash'] as string,
+          author: row['author'] as string,
+          date: row['date'] as string,
+          message: row['message'] as string,
+          filePath: row['filePath'] as string,
+          condensedDiff: row['condensedDiff'] as string,
+          filesChanged: (row['filesChanged'] as string).split(',').filter(Boolean),
+        },
+        score: 0, // direct lookup — best possible score
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Search code chunks filtered to those with AST metadata ([DEFINES]/[EXPORTS]).
+   * Used to boost structural chunks when implementation intent is high.
+   */
+  async searchCodeWithAST(
+    queryEmbedding: number[],
+    topK: number
+  ): Promise<SearchResult[]> {
+    const table = await this.getCodeTable();
+    if (!table) return [];
+
+    try {
+      let query = table.vectorSearch(queryEmbedding)
+        .where(`content LIKE '%[DEFINES]%' OR content LIKE '%[EXPORTS]%'`)
+        .limit(topK);
+      if (await this.isSQEnabled()) {
+        query = query.refineFactor(SQ_REFINE_FACTOR);
+      }
+      const results = await query.toArray();
+
+      return results.map((row: Record<string, unknown>) => ({
+        type: 'code' as const,
+        chunk: {
+          filePath: row['filePath'] as string,
+          language: row['language'] as string,
+          startLine: row['startLine'] as number,
+          endLine: row['endLine'] as number,
+          content: row['content'] as string,
+          isSummary: (row['isSummary'] as number) === 1,
+        },
+        score: row['_distance'] as number,
+      }));
+    } catch {
+      // Fallback: if the WHERE clause fails (e.g. old index without AST metadata),
+      // return empty — regular code search will still work
+      return [];
+    }
+  }
+
   // ─── Code Files Table ───
 
   async createCodeTable(
