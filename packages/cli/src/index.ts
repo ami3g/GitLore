@@ -35,8 +35,8 @@ function loadConfig(): GitLoreConfig {
 
 program
   .name('gitlore')
-  .description('Chat with your Git history from the terminal')
-  .version('0.1.0');
+  .description('Git-Lore — Chat with your Git history, codebase, and PRs from the terminal')
+  .version('0.2.0');
 
 program
   .command('index')
@@ -351,6 +351,178 @@ diagram
 
     const mermaid = new MermaidService();
     console.log(mermaid.generatePRIssueFlow(prs));
+  });
+
+// ─── Config Commands ───
+
+const configCmd = program
+  .command('config')
+  .description('Manage Git-Lore configuration');
+
+/** Path to the .gitlore.json config file in the current repo */
+function configFilePath(): string {
+  return path.resolve(process.cwd(), '.gitlore.json');
+}
+
+/** Read existing .gitlore.json or return empty object */
+function readConfigFile(): Record<string, unknown> {
+  const p = configFilePath();
+  if (fs.existsSync(p)) {
+    return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  }
+  return {};
+}
+
+/** Write config object to .gitlore.json */
+function writeConfigFile(config: Record<string, unknown>): void {
+  fs.writeFileSync(configFilePath(), JSON.stringify(config, null, 2) + '\n');
+}
+
+configCmd
+  .command('show')
+  .description('Show current configuration (file + env vars)')
+  .action(() => {
+    const fileConfig = readConfigFile();
+    const merged = loadConfig();
+
+    console.log('─── Git-Lore Configuration ───\n');
+    console.log('Source: .gitlore.json + environment variables\n');
+    console.log(`  LLM Provider:      ${merged.llmProvider}`);
+    console.log(`  OpenAI Model:      ${merged.openaiModel}`);
+    console.log(`  OpenAI API Key:    ${process.env.OPENAI_API_KEY ? '••••' + process.env.OPENAI_API_KEY.slice(-4) : '(not set)'}`);
+    console.log(`  Ollama Endpoint:   ${merged.ollamaEndpoint}`);
+    console.log(`  Ollama Model:      ${merged.ollamaModel}`);
+    console.log(`  GitHub Token:      ${process.env.GITHUB_TOKEN ? '••••' + process.env.GITHUB_TOKEN.slice(-4) : '(not set)'}`);
+    console.log(`  GitHub Repo:       ${merged.githubRepo ?? '(auto-detected from git remote)'}`);
+    console.log(`  Commit Depth:      ${merged.commitDepth}`);
+    console.log(`  Top-K Results:     ${merged.topK}`);
+    console.log(`\n  Config file: ${configFilePath()}`);
+    if (Object.keys(fileConfig).length > 0) {
+      console.log(`  File contents: ${JSON.stringify(fileConfig, null, 2)}`);
+    }
+  });
+
+configCmd
+  .command('set <key> <value>')
+  .description('Set a config value in .gitlore.json')
+  .addHelpText('after', `
+Supported keys:
+  llmProvider       "openai" or "ollama"
+  openaiModel       e.g. "gpt-4o", "gpt-4o-mini"
+  ollamaEndpoint    e.g. "http://localhost:11434"
+  ollamaModel       e.g. "llama3.2", "codellama"
+  commitDepth       Number of commits to index (0 = unlimited)
+  topK              Results per query (default: 5)
+  githubRepo        "owner/repo" override
+
+For API keys, use environment variables instead:
+  export OPENAI_API_KEY=sk-...
+  export GITHUB_TOKEN=ghp_...`)
+  .action((key: string, value: string) => {
+    const VALID_KEYS = ['llmProvider', 'openaiModel', 'ollamaEndpoint', 'ollamaModel', 'commitDepth', 'topK', 'githubRepo'];
+    if (!VALID_KEYS.includes(key)) {
+      console.error(`Unknown config key: ${key}`);
+      console.error(`Valid keys: ${VALID_KEYS.join(', ')}`);
+      process.exit(1);
+    }
+
+    const config = readConfigFile();
+    // Parse numeric values
+    if (key === 'commitDepth' || key === 'topK') {
+      const num = parseInt(value, 10);
+      if (isNaN(num)) {
+        console.error(`${key} must be a number`);
+        process.exit(1);
+      }
+      config[key] = num;
+    } else if (key === 'llmProvider' && value !== 'openai' && value !== 'ollama') {
+      console.error('llmProvider must be "openai" or "ollama"');
+      process.exit(1);
+    } else {
+      config[key] = value;
+    }
+
+    writeConfigFile(config);
+    console.log(`Set ${key} = ${value} in ${configFilePath()}`);
+  });
+
+configCmd
+  .command('reset')
+  .description('Delete .gitlore.json and revert to defaults')
+  .action(() => {
+    const p = configFilePath();
+    if (fs.existsSync(p)) {
+      fs.unlinkSync(p);
+      console.log(`Deleted ${p}. Using defaults.`);
+    } else {
+      console.log('No .gitlore.json found. Already using defaults.');
+    }
+  });
+
+// ─── Info Command ───
+
+program
+  .command('info')
+  .description('Show all available commands, settings, and environment variables')
+  .action(() => {
+    console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║                    Git-Lore CLI v0.2.0                      ║
+║        Chat with your Git history, codebase, and PRs        ║
+╚══════════════════════════════════════════════════════════════╝
+
+INDEXING COMMANDS
+  gitlore index               Full pipeline: commits + code + PRs + call graph
+    --depth <n>               Max commits to index (default: 1000, 0 = unlimited)
+  gitlore index-code          Re-index only source files (fast, incremental)
+  gitlore index-prs           Re-index only PRs from GitHub
+
+QUERY COMMANDS
+  gitlore query <question>    Ask about the repository
+    --top-k <n>               Results to retrieve (default: 10)
+  gitlore standup             Summarize recent changes
+
+DIAGRAM COMMANDS (output Mermaid syntax)
+  gitlore diagram architecture    File/module structure
+  gitlore diagram callgraph       Call graph (--entry <function>)
+  gitlore diagram commits         Commit timeline (--limit <n>)
+  gitlore diagram prs             PR/issue flow
+
+CONFIGURATION COMMANDS
+  gitlore config show         Show current config (file + env vars)
+  gitlore config set <k> <v>  Set a value in .gitlore.json
+  gitlore config reset        Delete .gitlore.json, revert to defaults
+
+CONFIGURABLE SETTINGS (.gitlore.json)
+  llmProvider                 "openai" or "ollama" (default: ollama)
+  openaiModel                 OpenAI model name (default: gpt-4o)
+  ollamaEndpoint              Ollama server URL (default: http://localhost:11434)
+  ollamaModel                 Ollama model name (default: llama3.2)
+  commitDepth                 Max commits to index (default: 1000)
+  topK                        Results per query (default: 5)
+  githubRepo                  "owner/repo" override (auto-detected)
+
+ENVIRONMENT VARIABLES
+  OPENAI_API_KEY              OpenAI API key (required for openai provider)
+  GITHUB_TOKEN                GitHub personal access token (for PR indexing)
+  GITLORE_LLM_PROVIDER       Override llmProvider
+  GITLORE_OPENAI_MODEL        Override openaiModel
+  GITLORE_OLLAMA_ENDPOINT     Override ollamaEndpoint
+  GITLORE_OLLAMA_MODEL        Override ollamaModel
+  GITLORE_GITHUB_REPO         Override githubRepo
+
+OTHER COMMANDS
+  gitlore status              Show index statistics
+  gitlore clear               Delete the local index
+  gitlore info                This help screen
+  gitlore --help              Commander help
+  gitlore --version           Show version
+
+LLM PROVIDERS
+  Ollama (default):  ollama pull llama3.2 → works out of the box
+  OpenAI:            export OPENAI_API_KEY=sk-...
+                     gitlore config set llmProvider openai
+`);
   });
 
 program.parse();
