@@ -657,6 +657,10 @@ export class RAGEngine {
             const chunk = fileChunks[ci];
             if (!chunkHasSymbol(chunk)) continue;
 
+            // Force-expand any chunk that defines a queried symbol
+            // (e.g. res.send() lives in a different chunk than res.json())
+            contextExpandedKeys.add(`${chunk.filePath}:${chunk.startLine}`);
+
             const fns = getChunkFns(chunk);
             // Find the parent function: the outermost function in this chunk that
             // isn't the symbol itself. For expressjs, next() is inside proto.handle —
