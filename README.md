@@ -17,6 +17,7 @@ Git-Lore indexes your commit history, current source files, GitHub PRs, and the 
 - [Indexing Pipeline](#indexing-pipeline)
 - [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
+- [Battle-Tested: Express.js Stress Tests](#battle-tested-expressjs-stress-tests)
 - [Privacy & Security](#privacy--security)
 - [Development](#development)
 - [License](#license)
@@ -466,6 +467,44 @@ Repos with 5,000+ commits are automatically handled differently:
 | Query breadth | `topK` from config | Fixed 10 — focused + aggressive reranking |
 
 **No data truncation at any scale.** All commits, all code, all PRs are indexed. The scaling strategy is smarter search, not less data.
+
+---
+
+## Battle-Tested: Express.js Stress Tests
+
+Git-Lore was validated against the **Express.js repository** (12,889 commits, 116 source files, 2,443 PRs, 11,404 call graph edges) — one of the most architecturally complex Node.js projects. Each test targets a known failure mode of standard RAG systems.
+
+### 1. The "Ghost in the Machine" Test — Closure Identification
+
+**Challenge:** Trace the `next()` iterator inside `lib/router/index.js`.
+
+In Express, `next` isn't a top-level function — it's a closure buried deep inside `proto.handle`. Most RAG systems grab a random 20-line snippet and lose the surrounding loop context entirely.
+
+**Result:** Contextual Expansion (Step 4) detected that `next()` is defined inside `proto.handle`, walked up to the parent function, and expanded the entire `while` loop plus the recursive dispatch logic. The LLM correctly identified that Express 4.x routing is entirely synchronous.
+
+### 2. The "Architecture Trace" Test — Cross-File Dependency
+
+**Challenge:** Trace a request from `express.js` → `application.js` → `response.js`.
+
+This requires the engine to understand **prototype injection** — `res.send()` is defined in `response.js` but "magically" attached to the app object in `application.js` via `Object.setPrototypeOf`.
+
+**Result:** Anchor File Persistence (Step 4b) forced expansion of the top hub files by call-graph degree centrality. The LLM saw the `Object.setPrototypeOf` calls that wire the three files together, and correctly explained the prototype chain.
+
+### 3. The "Historical Narrative" Test — The Budget Flip
+
+**Challenge:** Identify security changes and the reverted CVE-2024-51999 patch.
+
+Standard RAG only looks at the current code. It has no awareness that a security patch was added and then *removed* because it was erroneous.
+
+**Result:** The Elastic Budget (Step 7) flipped to 80% commits / 20% code for this historical query. The engine surfaced the PR discussions and commit messages that explained *why* the patch was reverted — the narrative behind the code, not just the code itself.
+
+### 4. The "Logical Handoff" Test — Symbol Discovery
+
+**Challenge:** Trace `res.json()` through `res.send()`.
+
+These functions live in the same file but hundreds of lines apart. Standard 256-line chunking provides one or the other, but rarely both in a way that shows the handoff.
+
+**Result:** Symbol Discovery (Step 3) identified both `json` and `send` as queried symbols. Cross-Symbol Expansion (Step 5) force-expanded both chunks regardless of their vector rank. The LLM explained how `res.json()` pre-sets the `Content-Type` header before `res.send()` begins serialization.
 
 ---
 
