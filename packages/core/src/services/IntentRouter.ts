@@ -16,6 +16,8 @@ export interface IntentWeights {
   distribution: Record<QueryIntent, number>;
   /** Fraction of snippet budget allocated to code results (0–1). Remainder goes to commits/PRs. */
   codeBudgetRatio: number;
+  /** Recency decay strength for commit/PR results (0 = no decay, higher = older penalized more) */
+  recencyDecay: number;
 }
 
 // ─── Keyword dictionaries (lowercase, checked via word-boundary regex) ───
@@ -93,6 +95,18 @@ const CODE_BUDGET_RATIOS: Record<QueryIntent, number> = {
   general:        0.50,
 };
 
+// ─── Recency decay rates: how heavily to penalize old commits/PRs ───
+// 0.0 = no penalty (historical queries WANT old results)
+// Higher = older results pushed down more aggressively
+// Applied as: distance × (1 + decayRate × ageFraction)  where ageFraction = yearsOld / HALF_LIFE
+const RECENCY_DECAY_RATES: Record<QueryIntent, number> = {
+  overview:       0.30,   // moderate — prefer current state
+  historical:     0.00,   // zero — old PRs/commits are the point
+  implementation: 0.40,   // strong — stale commits are hallucination fuel
+  debugging:      0.15,   // mild — recent regressions matter, but old root causes too
+  general:        0.20,   // light
+};
+
 /**
  * Soft-max over raw match counts → probability distribution.
  * Temperature controls sharpness: lower = more peaked, higher = more uniform.
@@ -130,7 +144,7 @@ export function classifyIntent(query: string): IntentWeights {
   // No strong signal → pure general (uniform)
   if (maxCount === 0) {
     const dist: Record<QueryIntent, number> = { overview: 0, historical: 0, implementation: 0, debugging: 0, general: 1.0 };
-    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0, distribution: dist, codeBudgetRatio: 0.50 };
+    return { intent: 'general', commit: 1.0, code: 1.0, pr: 1.0, distribution: dist, codeBudgetRatio: 0.50, recencyDecay: RECENCY_DECAY_RATES.general };
   }
 
   // Give 'general' a small base score (acts as smoothing / floor)
@@ -164,14 +178,39 @@ export function classifyIntent(query: string): IntentWeights {
     codeBudgetRatio += probs[i] * CODE_BUDGET_RATIOS[intentNames[i]];
   }
 
-  return { intent, commit, code, pr, distribution, codeBudgetRatio };
+  // Blend recency decay rate from distribution
+  let recencyDecay = 0;
+  for (let i = 0; i < intentNames.length; i++) {
+    recencyDecay += probs[i] * RECENCY_DECAY_RATES[intentNames[i]];
+  }
+
+  return { intent, commit, code, pr, distribution, codeBudgetRatio, recencyDecay };
 }
 
 import type { SearchResult } from '../types';
 
+/** Half-life for recency decay in years. A 2-year-old result gets penalty = decayRate × 1.0 */
+const DECAY_HALF_LIFE_YEARS = 2;
+
 /**
- * Apply intent weights to search results.
- * Divides the raw distance score by the weight — higher weight = lower (better) score.
+ * Extract an ISO date string from a search result, if available.
+ * Returns undefined for code results (they represent current state, not historical).
+ */
+function getResultDate(r: SearchResult): string | undefined {
+  if (r.type === 'commit') return r.chunk.date;
+  if (r.type === 'pr') return r.chunk.mergedAt || r.chunk.createdAt;
+  return undefined; // code = current, no decay
+}
+
+/**
+ * Apply intent weights + recency decay to search results.
+ *
+ * Intent weights: divides raw distance by weight (higher weight → better rank).
+ * Recency decay: multiplies distance by (1 + decayRate × ageFraction) for commit/PR results.
+ *   - ageFraction = yearsOld / DECAY_HALF_LIFE_YEARS (capped at 3.0 to avoid extreme penalties)
+ *   - decayRate = 0 for historical intent (old results are the point)
+ *   - decayRate > 0 for other intents (stale commits pushed down)
+ *
  * Returns a new array sorted by weighted score, ready for greedy token filling.
  */
 export function rerank(
@@ -184,10 +223,25 @@ export function rerank(
     pr: weights.pr,
   };
 
+  const now = Date.now();
+  const decay = weights.recencyDecay;
+
   return results
-    .map((r) => ({
-      ...r,
-      score: r.score / (weightMap[r.type] || 1.0),
-    }))
+    .map((r) => {
+      let score = r.score / (weightMap[r.type] || 1.0);
+
+      // Apply recency decay to commit/PR results when decay > 0
+      if (decay > 0) {
+        const dateStr = getResultDate(r);
+        if (dateStr) {
+          const ageMs = now - new Date(dateStr).getTime();
+          const ageYears = Math.max(0, ageMs / (365.25 * 24 * 60 * 60 * 1000));
+          const ageFraction = Math.min(ageYears / DECAY_HALF_LIFE_YEARS, 3.0); // cap at 3× half-life
+          score *= (1 + decay * ageFraction);
+        }
+      }
+
+      return { ...r, score };
+    })
     .sort((a, b) => a.score - b.score); // lower = better
 }

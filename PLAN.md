@@ -360,12 +360,23 @@ Transform the query pipeline from fixed-budget greedy filling into an **intent-d
 - [x] Replaced SQL WHERE filter in `getCodeChunksForFiles()` with JS-side `Set` filtering: load all rows, filter in memory
 - [x] Reliable at all scales — no dependency on DataFusion's column name handling
 
+### Phase 26: Intent-Aware Recency Decay ✅
+- [x] New `RECENCY_DECAY_RATES` per intent: implementation=0.40, overview=0.30, general=0.20, debugging=0.15, historical=0.00
+- [x] `DECAY_HALF_LIFE_YEARS = 2` — a 2-year-old result gets penalty = decayRate × 1.0; cap at 3× half-life (6 years)
+- [x] `rerank()` applies `distance × (1 + decayRate × ageFraction)` to commit/PR results
+- [x] Code results are immune (they represent current state, not historical)
+- [x] Historical intent gets `decayRate = 0` — old PRs/commits are preserved because they're the answer
+- [x] `IntentWeights.recencyDecay` blended via soft-max distribution, same as all other weights
+- [x] `getResultDate()` extracts date from commit (`chunk.date`) or PR (`chunk.mergedAt || chunk.createdAt`)
+- [x] Prevents "hallucination fuel" from stale commits about replaced frameworks ranking above current-era context
+
 ### Key Decisions (v4)
 - **JS-side filtering over SQL WHERE**: LanceDB's DataFusion backend can't handle camelCase column names reliably — double-quoted returns 0, unquoted lowercases. JS-side Set filtering is correct and fast enough for code tables (typically <10K rows).
 - **120K prompt budget**: Modern LLMs handle long context well. More context = fewer hallucinations. 110K for snippets is generous enough to include multiple expanded files + dozens of commit chunks.
 - **Intent-driven budget split**: An implementation question should be 80% code, not 50/50. Historical questions should be 80% commits. The intent router now controls this directly.
 - **Cross-symbol expansion**: Essential for trace queries like "how does res.json() relate to res.send()". Without it, the LLM only sees the highest-ranked chunk and misses the second symbol's implementation.
 - **AST metadata at index time**: Moving AST parsing into `indexAll()` means metadata is persisted in LanceDB, not just used for embedding enrichment. This enables downstream features (skeleton lines, symbol-based expansion) without re-parsing files at query time.
+- **Intent-aware recency decay**: Blanket age penalties would sabotage historical queries. The decay rate is soft-max-blended from the intent distribution, so a 49% historical + 51% implementation query still respects old results while mildly preferring recent ones. The 2-year half-life with 3× cap ensures very old results are pushed down, not eliminated.
 
 ### Commits
 - `2f18783` — Content-aware symbol discovery

@@ -247,9 +247,19 @@ Each intent also controls per-source-type boost weights for reranking:
 | Debugging | 1.5× | 1.2× | 0.7× |
 | General | 1.0× | 1.0× | 1.0× |
 
-### 2. Vector Search
+Each intent also controls **recency decay** — how aggressively stale commits and PRs are penalized during reranking:
 
-Queries all three vector tables (commits, code_files, pr_data) simultaneously. For large repos, code search is 60% directory-scoped (near the active file) + 40% global.
+| Intent | Recency Decay | Rationale |
+|--------|--------------|-----------|
+| Implementation | 0.40 (strong) | Old commits about replaced code are hallucination fuel |
+| Overview | 0.30 (moderate) | Prefer the current state of the project |
+| General | 0.20 (light) | Mild preference for recent context |
+| Debugging | 0.15 (mild) | Recent regressions matter, but old root causes too |
+| Historical | 0.00 (none) | Old PRs and commits are exactly what was asked for |
+
+Decay formula: `distance × (1 + decayRate × min(ageYears / 2, 3))`. A 4-year-old commit with decayRate 0.40 gets a 0.80× distance penalty — pushed down but not eliminated. Historical queries bypass decay entirely.
+
+### 2. Vector Search (commits, code_files, pr_data) simultaneously. For large repos, code search is 60% directory-scoped (near the active file) + 40% global.
 
 ### 3. Symbol Discovery & File Mention Extraction
 
