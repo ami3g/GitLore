@@ -257,7 +257,12 @@ Each intent also controls **recency decay** — how aggressively stale commits a
 | Debugging | 0.15 (mild) | Recent regressions matter, but old root causes too |
 | Historical | 0.00 (none) | Old PRs and commits are exactly what was asked for |
 
-Decay formula: `distance × (1 + decayRate × min(ageYears / 2, 3))`. A 4-year-old commit with decayRate 0.40 gets a 0.80× distance penalty — pushed down but not eliminated. Historical queries bypass decay entirely.
+**Temporal anchoring:** When the query references a time period ("in 2022", "last year", "3 months ago"), the reranker switches from recency-from-now to **proximity-to-anchor** scoring. Results closest to the referenced era rank highest — both older and newer results are penalized proportionally. This works for all intents: "how did auth work in 2022?" prefers 2022-era commits even though it's an implementation query.
+
+Supported temporal patterns: bare years (`2022`), month+year (`March 2022`), relative (`3 months ago`, `last year`), and vague recency (`recently`, `lately`).
+
+Decay formula (no anchor): `distance × (1 + decayRate × min(ageYears / 2, 3))`.
+Proximity formula (with anchor): `distance × (1 + 0.50 × min(|distFromAnchor| / 1.5, 3))`.
 
 ### 2. Vector Search (commits, code_files, pr_data) simultaneously. For large repos, code search is 60% directory-scoped (near the active file) + 40% global.
 
