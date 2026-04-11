@@ -1,6 +1,6 @@
 # PLAN.md — Git-Lore Source of Truth
 
-> Last updated: 2026-04-10
+> Last updated: 2025-07-19
 
 ---
 
@@ -195,7 +195,7 @@ gitlore/
 - **Incremental indexing**: `index-meta.json` stores `lastIndexedHash` for commits; `code-meta.json` stores file content hashes for code
 - **Rebase safety**: `git cat-file -t <hash>` verifies hash exists before incremental
 - **Paged extraction**: async generator yields 200-commit pages; embedding + DB writes happen per page then discard
-- **Token budget**: `MAX_PROMPT_CHARS = 60000`; system + snippets are fixed cost; oldest history dropped first
+- **Token budget**: `MAX_PROMPT_CHARS = 120000` (110K snippets + 10K system/history); elastic dual-stream split by intent (e.g. 80% code / 20% commits for implementation queries)
 - **Hierarchical code indexing**: large repos get 2-level embeddings — file summary (head+tail) for broad queries + 256-line detail chunks for specific queries
 - **4 LanceDB tables**: commits (vector), code_files (vector), pr_data (vector), call_graph (relational — no vectors)
 - **HNSW-SQ indices**: created on tables with 10K+ rows, compresses float32 → scalar quantized vectors for O(log n) search
@@ -309,3 +309,78 @@ Add a **tree-sitter-based static analysis layer** that extracts AST metadata (im
 - [x] Added `--top-k` flag to CLI `query` command (configurable retrieval depth)
 - [x] LanceDB path mismatch fixed in diagram commits/prs commands (`lancedb` → `db`)
 - [x] Tested live on Express repo: 12,889 commits, 275 code chunks, 2,443 PRs, 141 AST-parseable files, 11,404 call graph edges
+
+---
+
+## v4 — Elastic Budgets, Cross-Symbol Expansion & AST-Tagged Indexing ✅
+
+### Goal
+Transform the query pipeline from fixed-budget greedy filling into an **intent-driven elastic dual-stream** system. Populate **AST metadata directly during indexing** (not just at embedding enrichment time). Add **cross-symbol contextual expansion** so the LLM always sees complete implementations of every queried symbol — even when they span multiple chunks.
+
+### Phase 19: Elastic Dual-Stream Budgets ✅
+- [x] `MAX_PROMPT_CHARS` 60K → **120K** (110K snippets + 10K system/history reserve)
+- [x] New `CODE_BUDGET_RATIOS` per intent: implementation=0.80, overview=0.70, general=0.50, historical=0.20, debugging=0.20
+- [x] `codeBudget = snippetBudget × codeBudgetRatio`; `commitBudget = snippetBudget - codeBudget`
+- [x] Greedy filling: primary stream fills first, overflow spills into secondary stream — no context wasted
+- [x] `EXPAND_FILES` now intent-aware: 5 (overview/implementation/general), 3 (historical/debugging)
+- [x] `MAX_EXPAND_CHARS` 6K → **18,000** per expanded file
+
+### Phase 20: Content-Aware Symbol Discovery ✅
+- [x] Extract `querySymbols[]` from function-call syntax in the question: `func()` → captures name
+- [x] `CORE_LOOP_RE` keywords: `middleware`, `handler`, `route`, `controller`, `dispatch`, `render`, `serve`
+- [x] Extract `mentionedFiles[]` via regex: recognizes `path/file.ext` patterns in the question
+- [x] Symbol-matching chunks boosted 60% (multiply distance by 0.4)
+- [x] File-mention chunks boosted 70% (multiply distance by 0.3)
+- [x] Mentioned files force-expanded regardless of vector rank via `getAllUniqueFilePaths()` resolution
+
+### Phase 21: Contextual File Expansion ✅
+- [x] Parent function walk: for closures like `next()` inside `handle()`, detect parent-child via AST metadata + content scan
+- [x] All chunks belonging to a parent function get expanded together
+- [x] Non-hit chunks collapsed to one-line skeletons: `// --- Lines 1-256: fn createApp() | imports: http, path ---`
+- [x] Skeleton lines show function/class/import names from AST metadata when available
+
+### Phase 22: Cross-Symbol Expansion ✅
+- [x] Force-expand ANY chunk defining a queried symbol — not just parent-child relationships
+- [x] Example: query "trace res.json() through res.send()" → `json()` in chunk A (lines 200-456) and `send()` in chunk B (lines 1-256) both expanded
+- [x] Works via `contextExpandedKeys.add()` for symbol-defining chunks regardless of search rank
+
+### Phase 23: AST Metadata Population During Indexing ✅
+- [x] `CodeIndexer.indexAll()` now accepts optional 4th parameter: `ASTService`
+- [x] When provided, each file is parsed with `astService.parseFile()` before chunking
+- [x] `FileSymbols` passed to `chunkFile()` → `tagChunkWithAST()` intersects symbol ranges with chunk line ranges
+- [x] Metadata stored in LanceDB `code_files` table: `functions` (JSON), `classes` (JSON), `imports` (JSON), `exports` (JSON)
+- [x] `RAGEngine.indexCode()` creates `ASTService` upfront, passes to `indexAll()`, then reuses for `buildCallGraph()`
+
+### Phase 24: Anchor File Persistence ✅
+- [x] For implementation queries, top 3 most-connected files by call-graph degree centrality always in expansion set
+- [x] Hub files (e.g. `app.ts`, `index.js`) included even if their vector rank is low
+
+### Phase 25: LanceDB Query Fix ✅
+- [x] LanceDB DataFusion WHERE clause silently returns 0 rows for camelCase column names (e.g. `"filePath"`)
+- [x] Replaced SQL WHERE filter in `getCodeChunksForFiles()` with JS-side `Set` filtering: load all rows, filter in memory
+- [x] Reliable at all scales — no dependency on DataFusion's column name handling
+
+### Key Decisions (v4)
+- **JS-side filtering over SQL WHERE**: LanceDB's DataFusion backend can't handle camelCase column names reliably — double-quoted returns 0, unquoted lowercases. JS-side Set filtering is correct and fast enough for code tables (typically <10K rows).
+- **120K prompt budget**: Modern LLMs handle long context well. More context = fewer hallucinations. 110K for snippets is generous enough to include multiple expanded files + dozens of commit chunks.
+- **Intent-driven budget split**: An implementation question should be 80% code, not 50/50. Historical questions should be 80% commits. The intent router now controls this directly.
+- **Cross-symbol expansion**: Essential for trace queries like "how does res.json() relate to res.send()". Without it, the LLM only sees the highest-ranked chunk and misses the second symbol's implementation.
+- **AST metadata at index time**: Moving AST parsing into `indexAll()` means metadata is persisted in LanceDB, not just used for embedding enrichment. This enables downstream features (skeleton lines, symbol-based expansion) without re-parsing files at query time.
+
+### Commits
+- `2f18783` — Content-aware symbol discovery
+- `11e2b72` — File mention extraction and boosting
+- `c4fa27b` — Elastic dual-stream budgets
+- `0e48261` — Contextual expansion (parent function walk)
+- `83725b4` — Anchor file persistence
+- `01ed25e` — Non-hit chunk skeletons
+- `43cf466` — Structural context (call graph + co-change + freshness)
+- `d623b94` — JS-side filtering fix for LanceDB camelCase columns
+- `b9e2c4a` — AST metadata population during indexing
+- `46ccda9` — Cross-symbol expansion
+
+### Verified On
+- **Express.js repo** (Express 5): 12,889 commits, 116 code files, 2,443 PRs, 11,404 call edges
+- Queries tested: implementation trace (`res.json()`), security history, cross-file symbol discovery
+- All expanded files show AST metadata (functions, classes, imports) correctly
+- Elastic budgets adapt: 80/20 code/commit for impl, 50/50 for general, 20/80 for historical
