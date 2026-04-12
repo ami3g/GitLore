@@ -28,7 +28,7 @@ ANSWER RUBRIC — Evaluate your response against these criteria before finalizin
 2. **Cited**: Reference file paths, commit hashes, PR numbers, or line ranges for key points. Never say "in the codebase" — be specific.
 3. **Complete**: Address all parts of the question. If context only partially answers it, answer what you can and explicitly note what is missing.
 4. **No hallucination**: Do not invent file names, function names, commit hashes, or features not present in the retrieved snippets or file tree. If the file tree shows a path but no code was retrieved, you may mention its existence but not speculate on implementation.
-5. **Confidence signal**: When context is limited, end with a brief italic note, e.g., *"Note: Based on [N] code snippets and [M] commits. Retrieved context may not cover all relevant files."*
+5. **Confidence signal**: When context is limited, end with a brief italic note stating the actual snippet and commit counts provided (see the stats line at the end of the retrieved context). Example: *"Note: Based on 12 code snippets and 8 commits. Retrieved context may not cover all relevant files."*
 
 STRICT FORMATTING RULES:
 1. Use ### for Date headers (e.g., ### March 10, 2026) when discussing commits.
@@ -42,6 +42,49 @@ STRICT FORMATTING RULES:
 CONVERSATION CONTEXT: Use the provided conversation history for continuity, but always prioritize the "Retrieved Snippets" for technical accuracy on the current question. If the snippets contradict previous discussion, trust the snippets.
 
 TONE: Professional, concise, and developer-centric. Avoid "fluff" phrases like "The repository appears to be..." or "In summary..."`;
+
+const SYNTHESIS_ADDENDUM = `
+
+MANDATORY — CODE FLOW TRACING (this overrides all other instructions when a "how" question is asked):
+Your answer MUST contain a "## Code Flow" section that traces the actual function calls. This is non-negotiable.
+
+FORMAT REQUIRED:
+\`\`\`
+res.json(obj)                          // lib/response.js:XXX
+  → this.send(body)                    // lib/response.js:YYY  — body is JSON.stringify(obj)
+    → this.set('Content-Type', ...)    // lib/response.js:ZZZ  — sets application/json
+    → this.end(chunk, encoding)        // lib/response.js:AAA  — writes to socket
+\`\`\`
+
+RULES:
+1. DO NOT just summarize commit messages. Read the [CODE] and [CODE – FULL FILE] snippets LINE BY LINE.
+2. For every claim about behavior, QUOTE the actual line of code: e.g., "At line 178, \`this.set('Content-Type', type)\` is called..."
+3. Show the CALL CHAIN: which function calls which, with file:line references.
+4. Show DATA TRANSFORMATIONS: how does the input argument change at each step?
+5. Your answer should have TWO parts:
+   Part 1: "## Historical Change" — the commit/PR that made the change and why (keep concise)
+   Part 2: "## Code Flow (Current)" — step-by-step trace through the CURRENT code showing mechanics
+6. If the retrieved code is insufficient to trace a specific call, say: "To complete this trace, the file [X] at function [Y] is needed."
+7. DO NOT write generic statements like "headers are managed efficiently" — that is useless. Show the EXACT code that manages them.`;
+
+const TRIAGE_PROMPT = `You are a code context triage agent. A developer asked a question about their codebase. You have been given retrieved code snippets and commit history.
+
+Your ONLY job: decide if the snippets contain enough ACTUAL SOURCE CODE to trace the code flow and answer the question mechanically (not just historically).
+
+If the snippets are SUFFICIENT to trace the code path step-by-step, respond exactly:
+VERDICT: SUFFICIENT
+
+If you need to see more source files to explain HOW the code works, respond:
+VERDICT: NEED_MORE
+file: relative/path/to/file.ext
+file: relative/path/to/other.ext
+reason: One sentence explaining what code flow is missing
+
+Rules:
+- Request at most 5 files
+- ONLY request files whose paths appear in the snippets, imports, require() calls, or call graph structure
+- Focus on files needed to trace function-to-function call chains
+- Do NOT request test files unless the question is specifically about tests`;
 
 // Rough character budget — modern LLMs (GPT-4o, Claude 3.5) handle 128K+ tokens.
 // We target ~30K tokens of context (~120K chars) leaving ample room for the response.
@@ -526,7 +569,7 @@ export class RAGEngine {
     //   - Chunks that weren't hits → collapse to a 1-line skeleton with symbol names
     // This means the LLM sees the whole file structure but only the relevant details.
     const EXPAND_FILES = (weights.intent === 'historical' || weights.intent === 'debugging') ? 3 : 5;
-    const MAX_EXPAND_CHARS = 18000; // raised to accommodate contextual expansion of parent functions
+    const MAX_EXPAND_CHARS = (weights.intent === 'historical' || weights.intent === 'debugging') ? 8000 : 18000;
 
     // Track which chunks were actually hit by vector search for each file
     const hitChunkKeys = new Set<string>();
@@ -744,8 +787,18 @@ export class RAGEngine {
     const expandedFileSet = new Set(expandedFiles.keys());
 
     // Account for expanded files in the CODE budget (they use prompt space too)
-    for (const [, content] of expandedFiles) {
-      usedCodeChars += content.length + 100; // +100 for header formatting
+    // Cap expanded file content to stay within code budget
+    let expandedChars = 0;
+    for (const [fp, content] of expandedFiles) {
+      const cost = content.length + 100; // +100 for header formatting
+      if (expandedChars + cost > codeBudget * 0.85) {
+        // Drop this expansion to leave room for individual snippets
+        expandedFiles.delete(fp);
+        expandedFileSet.delete(fp);
+        continue;
+      }
+      expandedChars += cost;
+      usedCodeChars += cost;
     }
 
     // For each expanded file, add ONE representative code result to `merged` so the
@@ -790,11 +843,19 @@ export class RAGEngine {
       const totalUsed = usedCodeChars + usedCommitChars;
 
       if (result.type === 'code') {
-        // Allow overflow into commit budget only if the code budget is nearly full
-        if (usedCodeChars + charCost > codeBudget && totalUsed + charCost > snippetBudget) continue;
+        // For historical/debugging intent, strictly cap code budget — don't spill into commit space
+        if (commitFirst) {
+          if (usedCodeChars + charCost > codeBudget) continue;
+        } else {
+          if (usedCodeChars + charCost > codeBudget && totalUsed + charCost > snippetBudget) continue;
+        }
         usedCodeChars += charCost;
       } else {
-        if (usedCommitChars + charCost > commitBudget && totalUsed + charCost > snippetBudget) continue;
+        if (commitFirst) {
+          if (usedCommitChars + charCost > commitBudget && totalUsed + charCost > snippetBudget) continue;
+        } else {
+          if (usedCommitChars + charCost > commitBudget) continue;
+        }
         usedCommitChars += charCost;
       }
       if (totalUsed + charCost > snippetBudget && merged.length > 0) break;
@@ -878,9 +939,23 @@ export class RAGEngine {
       }
     }
 
-    const messages = this.buildPrompt(question, merged, conversationHistory, expandedFiles, projectTree, structuralContext);
+    let messages = this.buildPrompt(question, merged, conversationHistory, expandedFiles, projectTree, structuralContext);
 
     const provider = this.getLLMProvider();
+
+    // ─── Two-pass synthesis: let the LLM request more files if needed ───
+    if (this.shouldSynthesize(question)) {
+      const enriched = await this.synthesisPass(
+        provider, store, repoPath, question, queryVector,
+        messages, merged, expandedFiles, conversationHistory,
+        projectTree, structuralContext,
+      );
+      if (enriched) {
+        messages = enriched;
+        console.error('[RAGEngine] Synthesis pass: enriched context with additional files');
+      }
+    }
+
     return provider.sendMessage(messages, onChunk);
   }
 
@@ -1066,60 +1141,109 @@ export class RAGEngine {
   ): LLMMessage[] {
     // Track which files have already been rendered via expanded content
     const renderedExpanded = new Set<string>();
+    const isSynthesis = this.shouldSynthesize(question);
 
-    const contextSnippets = results
-      .map((r, i) => {
-        if (r.type === 'commit') {
-          const c = r.chunk;
+    // Separate results by type for ordered rendering
+    const codeResults: { result: SearchResult; index: number }[] = [];
+    const commitResults: { result: SearchResult; index: number }[] = [];
+    const prResults: { result: SearchResult; index: number }[] = [];
+    results.forEach((r, i) => {
+      if (r.type === 'code') codeResults.push({ result: r, index: i });
+      else if (r.type === 'commit') commitResults.push({ result: r, index: i });
+      else prResults.push({ result: r, index: i });
+    });
+
+    // For synthesis (how/flow questions): code first, then commits
+    // For historical questions: keep interleaved score order
+    const orderedResults = isSynthesis
+      ? [...codeResults, ...prResults, ...commitResults]
+      : results.map((r, i) => ({ result: r, index: i }));
+
+    const renderSnippet = (r: SearchResult, displayIdx: number): string | null => {
+      if (r.type === 'commit') {
+        const c = r.chunk;
+        const lines = [
+          `--- Retrieved Snippet ${displayIdx} (score: ${r.score.toFixed(4)}) [COMMIT] ---`,
+          `[COMMIT: ${c.hash.substring(0, 8)}] Author: ${c.author} | Date: ${c.date}`,
+          `[MESSAGE]: ${c.message}`,
+        ];
+        if (c.filePath) lines.push(`[FILE]: ${c.filePath}`);
+        if (c.filesChanged.length > 0) lines.push(`[OTHER FILES]: ${c.filesChanged.join(', ')}`);
+        if (c.condensedDiff) lines.push(`[DIFF]:\n${c.condensedDiff}`);
+        return lines.join('\n');
+      } else if (r.type === 'pr') {
+        const c = r.chunk;
+        const lines = [
+          `--- Retrieved Snippet ${displayIdx} (score: ${r.score.toFixed(4)}) [PR] ---`,
+          `[PR #${c.prNumber}] ${c.title} | State: ${c.state} | Author: ${c.author}`,
+        ];
+        if (c.description) lines.push(`[DESCRIPTION]: ${c.description.slice(0, 500)}`);
+        if (c.linkedIssues) lines.push(`[LINKED ISSUES]: ${c.linkedIssues}`);
+        if (c.mergedAt) lines.push(`[MERGED]: ${c.mergedAt}`);
+        if (c.resolvedBy) lines.push(`[MERGE COMMIT]: ${c.resolvedBy.substring(0, 8)}`);
+        return lines.join('\n');
+      } else {
+        const c = r.chunk;
+
+        // Small-to-Big: if we have expanded content for this file, render it once
+        if (expandedFiles?.has(c.filePath) && !renderedExpanded.has(c.filePath)) {
+          renderedExpanded.add(c.filePath);
+          const expanded = expandedFiles.get(c.filePath)!;
           const lines = [
-            `--- Retrieved Snippet ${i + 1} (score: ${r.score.toFixed(4)}) [COMMIT] ---`,
-            `[COMMIT: ${c.hash.substring(0, 8)}] Author: ${c.author} | Date: ${c.date}`,
-            `[MESSAGE]: ${c.message}`,
-          ];
-          if (c.filePath) lines.push(`[FILE]: ${c.filePath}`);
-          if (c.filesChanged.length > 0) lines.push(`[OTHER FILES]: ${c.filesChanged.join(', ')}`);
-          if (c.condensedDiff) lines.push(`[DIFF]:\n${c.condensedDiff}`);
-          return lines.join('\n');
-        } else if (r.type === 'pr') {
-          const c = r.chunk;
-          const lines = [
-            `--- Retrieved Snippet ${i + 1} (score: ${r.score.toFixed(4)}) [PR] ---`,
-            `[PR #${c.prNumber}] ${c.title} | State: ${c.state} | Author: ${c.author}`,
-          ];
-          if (c.description) lines.push(`[DESCRIPTION]: ${c.description.slice(0, 500)}`);
-          if (c.linkedIssues) lines.push(`[LINKED ISSUES]: ${c.linkedIssues}`);
-          if (c.mergedAt) lines.push(`[MERGED]: ${c.mergedAt}`);
-          if (c.resolvedBy) lines.push(`[MERGE COMMIT]: ${c.resolvedBy.substring(0, 8)}`);
-          return lines.join('\n');
-        } else {
-          const c = r.chunk;
-
-          // Small-to-Big: if we have expanded content for this file, render it once
-          if (expandedFiles?.has(c.filePath) && !renderedExpanded.has(c.filePath)) {
-            renderedExpanded.add(c.filePath);
-            const expanded = expandedFiles.get(c.filePath)!;
-            const lines = [
-              `--- Retrieved Snippet ${i + 1} (score: ${r.score.toFixed(4)}) [CODE – FULL FILE] ---`,
-              `[CODE] File: ${c.filePath} | Language: ${c.language}`,
-              expanded,
-            ];
-            return lines.join('\n');
-          }
-
-          // Already rendered expanded version of this file — skip duplicate chunk
-          if (renderedExpanded.has(c.filePath)) return null;
-
-          const truncatedContent = c.content.length > 3000 ? c.content.slice(0, 3000) + '\n... [truncated]' : c.content;
-          const lines = [
-            `--- Retrieved Snippet ${i + 1} (score: ${r.score.toFixed(4)}) [CODE] ---`,
-            `[CODE] File: ${c.filePath} | Language: ${c.language} | Lines ${c.startLine}-${c.endLine}`,
-            truncatedContent,
+            `--- Retrieved Snippet ${displayIdx} (score: ${r.score.toFixed(4)}) [CODE – FULL FILE] ---`,
+            `[CODE] File: ${c.filePath} | Language: ${c.language}`,
+            expanded,
           ];
           return lines.join('\n');
         }
-      })
-      .filter(Boolean)
-      .join('\n\n');
+
+        // Already rendered expanded version of this file — skip duplicate chunk
+        if (renderedExpanded.has(c.filePath)) return null;
+
+        const truncatedContent = c.content.length > 3000 ? c.content.slice(0, 3000) + '\n... [truncated]' : c.content;
+        const lines = [
+          `--- Retrieved Snippet ${displayIdx} (score: ${r.score.toFixed(4)}) [CODE] ---`,
+          `[CODE] File: ${c.filePath} | Language: ${c.language} | Lines ${c.startLine}-${c.endLine}`,
+          truncatedContent,
+        ];
+        return lines.join('\n');
+      }
+    };
+
+    let contextSnippets: string;
+    if (isSynthesis) {
+      // Render code section with a clear header, then history section
+      const codeParts: string[] = [];
+      const historyParts: string[] = [];
+      let idx = 1;
+      for (const { result } of orderedResults) {
+        const rendered = renderSnippet(result, idx);
+        if (rendered) {
+          if (result.type === 'code') codeParts.push(rendered);
+          else historyParts.push(rendered);
+          idx++;
+        }
+      }
+      const sections: string[] = [];
+      if (codeParts.length > 0) {
+        sections.push(`=== SOURCE CODE (read this FIRST to trace the code flow) ===\n\n${codeParts.join('\n\n')}`);
+      }
+      if (historyParts.length > 0) {
+        sections.push(`=== COMMIT HISTORY & PRs (use for "why" and "when", NOT for "how") ===\n\n${historyParts.join('\n\n')}`);
+      }
+      contextSnippets = sections.join('\n\n---\n\n');
+    } else {
+      // Standard interleaved rendering
+      let idx = 1;
+      contextSnippets = orderedResults
+        .map(({ result }) => {
+          const rendered = renderSnippet(result, idx);
+          if (rendered) idx++;
+          return rendered;
+        })
+        .filter(Boolean)
+        .join('\n\n');
+    }
 
     const structurePreamble = structuralContext
       ? `## Code Structure (Call Graph)\n\nThe following shows how the top-ranked files connect to other code:\n\n${structuralContext}\n\n---\n\n`
@@ -1129,7 +1253,14 @@ export class RAGEngine {
       ? `## Project File Structure\n\nThe following is a complete listing of source files in this repository. Use this to identify features, modules, and capabilities — even those not directly retrieved above:\n\n${projectTree}\n\n---\n\n`
       : '';
 
-    const userMessage = `Here are the most relevant snippets from the repository:\n\n${contextSnippets}\n\n---\n\n${structurePreamble}${treePreamble}Question: ${question}`;
+    // Count actual snippets by type for the confidence signal
+    const codeCount = results.filter(r => r.type === 'code').length;
+    const commitCount = results.filter(r => r.type === 'commit').length;
+    const prCount = results.filter(r => r.type === 'pr').length;
+    const expandedCount = expandedFiles?.size ?? 0;
+    const statsLine = `[CONTEXT STATS] ${codeCount} code snippets (${expandedCount} full-file expansions), ${commitCount} commit records, ${prCount} PR records.`;
+
+    const userMessage = `Here are the most relevant snippets from the repository:\n\n${contextSnippets}\n\n---\n\n${statsLine}\n\n${structurePreamble}${treePreamble}Question: ${question}`;
 
     // Hard safety cap: if the prompt is still too large, truncate the user message
     const maxUserChars = MAX_PROMPT_CHARS - SYSTEM_PROMPT.length - 200;
@@ -1138,7 +1269,7 @@ export class RAGEngine {
       : userMessage;
 
     const messages: LLMMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: SYSTEM_PROMPT + (this.shouldSynthesize(question) ? SYNTHESIS_ADDENDUM : '') },
     ];
 
     if (conversationHistory && conversationHistory.length > 0) {
@@ -1263,5 +1394,174 @@ export class RAGEngine {
     if (days < 365) return `${Math.floor(days / 30)} months ago`;
     const years = Math.floor(days / 365);
     return years === 1 ? '1 year ago' : `${years} years ago`;
+  }
+
+  // ─── Two-Pass File-System Agency ───
+
+  /**
+   * Detect questions that benefit from code-flow tracing (the synthesis addendum
+   * and the two-pass triage). Matches "how", "affect", "flow", "trace",
+   * "mechanism", "calls", "internally", etc.
+   */
+  private shouldSynthesize(question: string): boolean {
+    const FLOW_RE = /\b(how\s+(does|do|did|is|are|will|would|could|can)|affects?|flow|trace|mechan|internal|under.?the.?hood|step.?by.?step|calls?\s+chain|propagat|data.?flow|code.?path|walks?.?through|end.?to.?end)\b/i;
+    return FLOW_RE.test(question);
+  }
+
+  /**
+   * Two-pass synthesis: send the initial prompt to the LLM as a triage request.
+   * If the LLM identifies missing files, read them from disk and rebuild the prompt.
+   */
+  private async synthesisPass(
+    provider: LLMProvider,
+    store: VectorStore,
+    repoPath: string,
+    question: string,
+    queryVector: number[],
+    initialMessages: LLMMessage[],
+    merged: SearchResult[],
+    expandedFiles: Map<string, string>,
+    conversationHistory?: LLMMessage[],
+    projectTree?: string,
+    structuralContext?: string,
+  ): Promise<LLMMessage[] | null> {
+    try {
+      // Extract user message (always last in the array)
+      const userMsg = initialMessages[initialMessages.length - 1];
+
+      // Pass 1: lightweight triage — does the LLM think it has enough code?
+      const triageMessages: LLMMessage[] = [
+        { role: 'system', content: TRIAGE_PROMPT },
+        { role: 'user', content: userMsg.content },
+      ];
+
+      const triageResponse = await provider.sendMessage(triageMessages); // no streaming
+
+      if (triageResponse.includes('VERDICT: SUFFICIENT')) {
+        console.error('[RAGEngine] Triage: context sufficient, skipping synthesis pass');
+        return null;
+      }
+
+      // Parse requested files from triage response
+      const requestedFiles = this.parseTriageFiles(triageResponse);
+      if (requestedFiles.length === 0) {
+        console.error('[RAGEngine] Triage: NEED_MORE but no parseable file requests');
+        return null;
+      }
+
+      console.error(`[RAGEngine] Triage: LLM requested ${requestedFiles.length} additional files: ${requestedFiles.join(', ')}`);
+
+      // Read the requested files from disk + store
+      const additionalFiles = await this.readRequestedFiles(store, repoPath, requestedFiles);
+      if (additionalFiles.size === 0) {
+        console.error('[RAGEngine] Triage: could not read any of the requested files');
+        return null;
+      }
+
+      console.error(`[RAGEngine] Triage: successfully read ${additionalFiles.size} files (${[...additionalFiles.values()].reduce((s, c) => s + c.length, 0)} chars)`);
+
+      // Merge additional files into expanded files
+      const enrichedExpanded = new Map(expandedFiles);
+      for (const [fp, content] of additionalFiles) {
+        if (!enrichedExpanded.has(fp)) {
+          enrichedExpanded.set(fp, content);
+        }
+      }
+
+      // Add synthetic search results for the new files so buildPrompt renders them
+      const enrichedMerged = [...merged];
+      for (const fp of additionalFiles.keys()) {
+        if (!merged.some(r => r.type === 'code' && r.chunk.filePath === fp)) {
+          enrichedMerged.push({
+            type: 'code' as const,
+            score: 999,
+            chunk: { filePath: fp, content: '', language: path.extname(fp).slice(1), startLine: 0, endLine: 0, embedding: [] },
+          } as SearchResult);
+        }
+      }
+
+      // Rebuild prompt with enriched context
+      return this.buildPrompt(
+        question, enrichedMerged, conversationHistory,
+        enrichedExpanded, projectTree, structuralContext,
+      );
+    } catch (err) {
+      console.error('[RAGEngine] Synthesis pass failed (non-fatal):', err);
+      return null;
+    }
+  }
+
+  /**
+   * Parse the triage LLM response for file path requests.
+   * Expected format: "file: path/to/file.ext" lines.
+   */
+  private parseTriageFiles(response: string): string[] {
+    const files: string[] = [];
+    const fileRe = /^file:\s*(.+)$/gm;
+    let m: RegExpExecArray | null;
+    while ((m = fileRe.exec(response)) !== null) {
+      const fp = m[1].trim();
+      // Basic sanitization: no absolute paths, no path traversal
+      if (fp && !path.isAbsolute(fp) && !fp.includes('..')) {
+        files.push(fp);
+      }
+    }
+    return files.slice(0, 5); // Cap at 5
+  }
+
+  /**
+   * Read requested files — first try the VectorStore (already chunked),
+   * then fall back to reading raw files from disk.
+   */
+  private async readRequestedFiles(
+    store: VectorStore,
+    repoPath: string,
+    requestedFiles: string[],
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    const MAX_FILE_CHARS = 12000;
+
+    // Try store first (indexed files have better chunking)
+    try {
+      const storeChunks = await store.getCodeChunksForFiles(requestedFiles);
+      const byFile = new Map<string, string[]>();
+      for (const chunk of storeChunks) {
+        if (!byFile.has(chunk.filePath)) byFile.set(chunk.filePath, []);
+        byFile.get(chunk.filePath)!.push(chunk.content);
+      }
+      for (const [fp, parts] of byFile) {
+        let combined = parts.join('\n');
+        if (combined.length > MAX_FILE_CHARS) {
+          combined = combined.slice(0, MAX_FILE_CHARS) + '\n... [truncated for synthesis]';
+        }
+        result.set(fp, combined);
+      }
+    } catch {
+      // Store might not have these files
+    }
+
+    // Fall back to disk for files not found in store
+    for (const reqFile of requestedFiles) {
+      if (result.has(reqFile)) continue;
+
+      // Resolve against repo root, then check it's still under repoPath
+      const absPath = path.resolve(repoPath, reqFile);
+      const normalizedRepo = path.resolve(repoPath);
+      if (!absPath.startsWith(normalizedRepo)) continue; // path traversal guard
+
+      try {
+        if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
+          let content = fs.readFileSync(absPath, 'utf-8');
+          if (content.length > MAX_FILE_CHARS) {
+            content = content.slice(0, MAX_FILE_CHARS) + '\n... [truncated for synthesis]';
+          }
+          result.set(reqFile, content);
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+
+    return result;
   }
 }

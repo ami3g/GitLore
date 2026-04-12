@@ -895,6 +895,53 @@ export class VectorStore {
     try { fs.unlinkSync(markerPath); } catch { /* OK */ }
   }
 
+  /**
+   * Get recent commit chunks (for commit timeline diagrams).
+   */
+  async getRecentCommits(limit: number): Promise<CommitChunk[]> {
+    const table = await this.getCommitTable();
+    if (!table) return [];
+    const rows = await table.query().select(['hash', 'author', 'date', 'message', 'filePath', 'condensedDiff', 'filesChanged']).limit(limit).toArray();
+    const seen = new Set<string>();
+    const result: CommitChunk[] = [];
+    for (const r of rows) {
+      if (seen.has(r.hash as string)) continue;
+      seen.add(r.hash as string);
+      result.push({
+        hash: r.hash as string,
+        author: r.author as string,
+        date: r.date as string,
+        message: r.message as string,
+        filePath: r.filePath as string,
+        condensedDiff: r.condensedDiff as string,
+        filesChanged: (r.filesChanged as string).split(',').filter(Boolean),
+      });
+      if (result.length >= limit) break;
+    }
+    return result;
+  }
+
+  /**
+   * Get all PR chunks (for PR flow diagrams).
+   */
+  async getPRChunks(): Promise<PRChunk[]> {
+    const table = await this.getPRTable();
+    if (!table) return [];
+    const rows = await table.query().select(['prNumber', 'title', 'description', 'state', 'author', 'mergedBy', 'createdAt', 'mergedAt', 'linkedIssues', 'resolvedBy']).toArray();
+    return rows.map((r: any) => ({
+      prNumber: r.prNumber,
+      title: r.title,
+      description: r.description,
+      state: r.state,
+      author: r.author,
+      mergedBy: r.mergedBy,
+      createdAt: r.createdAt,
+      mergedAt: r.mergedAt,
+      linkedIssues: r.linkedIssues,
+      resolvedBy: r.resolvedBy,
+    }));
+  }
+
   private async getCommitTable(): Promise<Table | null> {
     if (this.commitTable) return this.commitTable;
 
