@@ -10,7 +10,10 @@
     "build:core": "cd packages/core && npx tsc -b",
     "build:extension": "cd packages/vscode && node esbuild.js",
     "build:webview": "cd packages/vscode && npx vite build --config webview/vite.config.ts",
+    "build:desktop": "cd packages/desktop && npm run build",
     "compile": "npm run build:core && npm run build:extension && npm run build:webview",
+    "compile:desktop": "npm run build:core && npm run build:desktop",
+    "dev:desktop": "cd packages/desktop && npm run dev",
     "watch:extension": "cd packages/vscode && node esbuild.js --watch",
     "dev:webview": "cd packages/vscode/webview && npx vite build --watch",
     "lint": "tsc -b"
