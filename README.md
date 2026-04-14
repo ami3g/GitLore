@@ -1,128 +1,121 @@
-# Git-Lore
+<div align="center">
 
-**Chat with your repository's entire history, codebase, and PRs.** Privacy-first, RAG-powered project intelligence — as a VS Code extension, CLI tool, or Electron desktop app.
+# GitLore
 
-Git-Lore indexes your commit history, current source files, GitHub PRs, and the static call graph into a local vector database, then answers natural-language questions backed by real evidence from your repo. Embeddings and vector search run entirely on your machine — only the final top-K snippets are sent to the LLM.
+**RAG-powered intelligence for Git repositories**
+
+Chat with your codebase, commit history, and pull requests — backed by local embeddings, AST-aware chunking, and a 10-stage retrieval pipeline.
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![LanceDB](https://img.shields.io/badge/LanceDB-0.13-FF6B35)](https://lancedb.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[Getting Started](#getting-started) · [How It Works](#how-it-works) · [Architecture](#architecture) · [CLI Reference](#cli-reference) · [Validation](#battle-tested-expressjs-stress-tests)
+
+</div>
 
 ---
 
-## Table of Contents
+## Why GitLore?
 
-- [How It Works](#how-it-works)
-- [Quick Start](#quick-start)
-- [CLI Reference](#cli-reference)
-- [VS Code Extension](#vs-code-extension)
-- [Desktop App](#desktop-app)
-- [Configuration](#configuration)
-- [Query Pipeline Deep Dive](#query-pipeline-deep-dive)
-- [Indexing Pipeline](#indexing-pipeline)
-- [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
-- [Battle-Tested: Express.js Stress Tests](#battle-tested-expressjs-stress-tests)
-- [Privacy & Security](#privacy--security)
-- [Development](#development)
-- [License](#license)
+Most AI code assistants only see the file you have open. GitLore indexes your **entire repository** — every commit, every source file, every PR — into a local vector database and answers questions with real evidence.
+
+- **"How does the auth middleware work?"** → Traces the call chain across files with `file:line` references
+- **"Who rewrote the payment flow and why?"** → Surfaces the PR discussions and commit messages
+- **"What broke the tests last week?"** → Flips the retrieval budget to 80% commit history
+- **"Show me the architecture"** → Generates a Mermaid diagram from the actual call graph
+
+**Privacy-first:** Embeddings and vector search run entirely on your machine. Only the final top-K snippets are sent to the LLM.
+
+### Key Engineering Decisions
+
+| Problem | Solution |
+|---------|----------|
+| Standard RAG loses context across file boundaries | **10-stage retrieval pipeline** with cross-symbol expansion, anchor file persistence, and two-pass file-system agency |
+| 256-line chunks miss function closures | **AST-aware chunking** with parent-function detection via tree-sitter (9 languages) |
+| "When was X changed?" retrieves irrelevant code | **Intent classification** (5 intents) dynamically allocates budget between code and commit streams |
+| Old commits pollute results for "how does X work?" | **Temporal reranking** with intent-specific recency decay and anchor-based proximity scoring |
+| Large repos (10K+ commits) are too slow | **HNSW-SQ indices**, directory-scoped search, paged processing with constant memory |
+| LLM answers lack traceability | **Mandatory code-flow format** with numbered call chains and `file:line` citations |
 
 ---
 
 ## How It Works
 
-```
- ┌────────────┐   ┌────────────┐   ┌────────────┐
- │  Git Log   │   │ Source Files│   │ GitHub PRs │
- │  (commits) │   │ (code)     │   │ (issues)   │
- └─────┬──────┘   └─────┬──────┘   └─────┬──────┘
-       │                 │                 │
-       ▼                 ▼                 ▼
- ┌──────────────────────────────────────────────┐
- │       Extraction & Chunking Layer            │
- │                                              │
- │  GitProcessor    CodeIndexer    GitHubService │
- │  • file-level    • 256-line     • PR desc    │
- │    diff chunks     windows      • linked     │
- │  • smart          + 50-line       issues     │
- │    truncation      overlap      • resolution │
- │  • 57-rule       • AST-tagged     metadata   │
- │    exclusions      chunks       • merged-by  │
- │                  • hierarchical              │
- │                    summaries                 │
- │                    (large repos)             │
- └────────────────────┬─────────────────────────┘
-                      │
-                      ▼
- ┌──────────────────────────────────────────────┐
- │          ASTService (web-tree-sitter)        │
- │  9 languages · WASM grammars (lazy-loaded)   │
- │  Functions, classes, imports, exports, calls  │
- │  → FileSymbols per file                      │
- │  → CallGraphService: static + co-change edges│
- │  → Chunk-level metadata tagging              │
- └────────────────────┬─────────────────────────┘
-                      │
-                      ▼
- ┌──────────────────────────────────────────────┐
- │         EmbeddingService (local)             │
- │  all-MiniLM-L6-v2 · 384-dim · q8 quantized  │
- │  Batch 32 · Runs entirely in Node.js         │
- │  AST metadata prepended: [DEFINES]/[IMPORTS] │
- └────────────────────┬─────────────────────────┘
-                      │
-                      ▼
- ┌──────────────────────────────────────────────┐
- │           VectorStore (LanceDB)              │
- │                                              │
- │  ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐ │
- │  │commits │ │code_files│ │pr_data│ │call_  │ │
- │  │        │ │+AST meta │ │       │ │graph  │ │
- │  └────────┘ └─────────┘ └───────┘ └───────┘ │
- │                                              │
- │  • HNSW-SQ indices for large repos (10K+)    │
- │  • Directory-scoped search with bubble-up    │
- │  • Call graph: relational edges (no vectors) │
- └────────────────────┬─────────────────────────┘
-                      │
-                      ▼
- ┌──────────────────────────────────────────────┐
- │             Query Pipeline                   │
- │                                              │
- │  Question → IntentRouter (5 intents)         │
- │    → Vector search (3 tables, weighted)      │
- │    → Symbol discovery + file mention boost   │
- │    → Smart file expansion (Small-to-Big)     │
- │    → Cross-symbol contextual expansion       │
- │    → Elastic dual-stream budget filling      │
- │    → Structural context (call graph + age)   │
- │    → LLM → Streamed answer with citations    │
- └──────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Sources["Data Sources"]
+        GL["Git Log<br/><small>commits + diffs</small>"]
+        SF["Source Files<br/><small>git ls-files</small>"]
+        GH["GitHub API<br/><small>PRs + issues</small>"]
+    end
+
+    subgraph Indexing["Indexing Pipeline"]
+        GP["GitProcessor<br/><small>file-level diff chunks</small>"]
+        CI["CodeIndexer<br/><small>256-line windows + overlap</small>"]
+        GS["GitHubService<br/><small>PR descriptions + metadata</small>"]
+        AST["ASTService<br/><small>tree-sitter · 9 languages</small>"]
+        CG["CallGraphService<br/><small>static + co-change edges</small>"]
+        EMB["EmbeddingService<br/><small>all-MiniLM-L6-v2 · 384-dim</small>"]
+    end
+
+    subgraph Storage["Vector Store · LanceDB"]
+        CT["commits"]
+        CF["code_files"]
+        PR["pr_data"]
+        CGT["call_graph"]
+    end
+
+    subgraph Query["10-Stage Query Pipeline"]
+        IR["Intent Router<br/><small>5 intents · budget allocation</small>"]
+        VS["Vector Search<br/><small>3 tables · directory-scoped</small>"]
+        SD["Symbol Discovery<br/><small>function + file extraction</small>"]
+        RR["Reranker<br/><small>temporal decay · boost weights</small>"]
+        EX["Smart Expansion<br/><small>Small-to-Big · cross-symbol</small>"]
+        SC["Structural Context<br/><small>call graph + freshness</small>"]
+        BF["Budget Filler<br/><small>elastic dual-stream</small>"]
+        SY["Synthesis Pass<br/><small>two-pass file-system agency</small>"]
+    end
+
+    subgraph Output["Output"]
+        LLM["LLM<br/><small>OpenAI · Ollama</small>"]
+        ANS["Streamed Answer<br/><small>with citations</small>"]
+    end
+
+    GL --> GP --> EMB
+    SF --> CI --> EMB
+    SF --> AST --> CI
+    AST --> CG
+    GH --> GS --> EMB
+    EMB --> CT & CF & PR
+    CG --> CGT
+
+    CT & CF & PR --> VS
+    CGT --> SC
+
+    IR --> VS --> SD --> RR --> EX --> SC --> BF --> SY --> LLM --> ANS
+
+    style Sources fill:#1e293b,stroke:#334155,color:#e2e8f0
+    style Indexing fill:#1e293b,stroke:#334155,color:#e2e8f0
+    style Storage fill:#0f172a,stroke:#475569,color:#e2e8f0
+    style Query fill:#1e293b,stroke:#334155,color:#e2e8f0
+    style Output fill:#1e293b,stroke:#334155,color:#e2e8f0
 ```
 
 ### The Four Data Streams
 
-| Stream | Source | What's Indexed | Best For |
+| Stream | Source | What's Indexed | Example Queries |
 |--------|--------|----------------|----------|
-| **[COMMIT]** | `git log` + diffs | Per-file diff chunks with author, date, message | "When was X changed?", "Who added this?" |
-| **[CODE]** | `git ls-files` | 256-line chunks with AST metadata (functions, classes, imports, exports) | "How does auth work?", "Where is X defined?" |
-| **[PR]** | GitHub API | PR descriptions, linked issues, merge status, merged-by author | "What was the goal of this feature?" |
-| **[STRUCTURE]** | tree-sitter AST + call graph | Static call edges, co-change coupling, freshness labels | "What calls this function?", "Show the architecture" |
+| **Commits** | `git log` + diffs | Per-file diff chunks with author, date, message | "When was X changed?", "Who added this?" |
+| **Code** | `git ls-files` | 256-line chunks with AST metadata (functions, classes, imports) | "How does auth work?", "Where is X defined?" |
+| **PRs** | GitHub API | Descriptions, linked issues, merge status, reviewers | "What was the goal of this feature?" |
+| **Structure** | tree-sitter AST | Static call edges, co-change coupling, freshness labels | "What calls this function?" |
 
 ---
 
-## Quick Start
-
-### VS Code Extension
-
-```bash
-git clone https://github.com/ami3g/GitLore.git
-cd GitLore
-npm install
-npm run compile
-# Press F5 in VS Code → Extension Development Host
-```
-
-1. Open any project with Git history
-2. Click the **Git-Lore** icon in the activity bar
-3. Click **"Index Repo"** — indexes commits + code + PRs + call graph
-4. Ask questions in the chat sidebar
+## Getting Started
 
 ### Desktop App (Electron)
 
@@ -135,277 +128,32 @@ cd packages/desktop
 npm run dev
 ```
 
-1. Set your API key and model in **Settings**
-2. Navigate to **Index** → select a repo folder → index it
-3. Ask questions in **Ask** with adjustable TopK
-4. Generate Mermaid architecture/callgraph/commit/PR diagrams in **Diagrams**
+1. Configure your LLM provider in **Settings** (OpenAI or Ollama)
+2. Open **Index** → select a repository → run the indexing pipeline
+3. Ask questions in **Ask** — answers stream in with adjustable TopK
+4. Generate diagrams in **Diagrams** — architecture, call graph, commit timeline, PR flow
 
-### CLI Tool
-
-```bash
-cd packages/cli
-npm run build
-
-# Navigate to any repo
-cd ~/my-project
-
-# Full index (commits + code + PRs + call graph)
-gitlore index --depth 1000
-
-# Ask questions
-gitlore query "how does the auth middleware work?"
-gitlore query "what security fixes were made recently?" --top-k 20
-
-# Check what's indexed
-gitlore status
-```
-
----
-
-## CLI Reference
-
-| Command | Description | Options |
-|---------|-------------|---------|
-| `gitlore index` | Full pipeline: commits + code + PRs + call graph | `--depth <n>` (default: 1000, 0 = unlimited) |
-| `gitlore index-code` | Re-index only source files (fast, incremental) | — |
-| `gitlore index-prs` | Re-index only PRs from GitHub | — |
-| `gitlore query <question>` | Ask about the repository | `--top-k <n>` (default: 10) |
-| `gitlore standup` | Summarize recent changes | — |
-| `gitlore status` | Show index statistics | — |
-| `gitlore clear` | Delete the local index | — |
-| `gitlore diagram architecture` | Mermaid file/module structure diagram | — |
-| `gitlore diagram callgraph` | Mermaid call graph | `--entry <function>` |
-| `gitlore diagram commits` | Mermaid commit timeline | `--limit <n>` (default: 30) |
-| `gitlore diagram prs` | Mermaid PR/issue flow | — |
-| `gitlore config show` | Show current configuration (file + env vars) | — |
-| `gitlore config set <key> <value>` | Set a config value in `.gitlore.json` | Keys: `llmProvider`, `openaiModel`, `ollamaEndpoint`, `ollamaModel`, `commitDepth`, `topK`, `githubRepo` |
-| `gitlore config reset` | Delete `.gitlore.json` and revert to defaults | — |
-| `gitlore info` | Show all available commands, settings, and env vars | — |
-
-All diagram commands output Mermaid syntax to stdout — pipe to a file or clipboard.
-
----
-
-## VS Code Extension
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| **Git-Lore: Index Repository** | Full pipeline: commits + code + PRs + call graph |
-| **Git-Lore: Index Code Files** | Re-index only source files (fast) |
-| **Git-Lore: Clear Index** | Delete the local vector database |
-| **Git-Lore: Set OpenAI API Key** | Store key in VS Code SecretStorage |
-| **Git-Lore: What's Changed?** | Standup summary of recent commits |
-| **Git-Lore: Explain This Change** | Right-click a line → blame → RAG query |
-
-### Live Commit Detection
-
-The extension watches `.git/refs/` for changes (push, pull, fetch, local commits). When new commits are detected, it prompts: "New commits detected. Update the index?" — keeping your index fresh without manual re-runs.
-
----
-
-## Desktop App
-
-The Electron desktop app provides the same RAG engine in a standalone window with a richer UI:
-
-| Page | Features |
-|------|----------|
-| **Ask** | Streaming chat, adjustable TopK (5-50), markdown rendering with syntax highlighting |
-| **Diagrams** | Generate architecture/callgraph/commit/PR Mermaid diagrams, zoom/pan/pinch, auto-save, load/delete saved diagrams |
-| **Index** | Select any local repo, run full or code-only indexing with progress |
-| **Settings** | LLM provider (OpenAI/Ollama), model selection, API key, Ollama endpoint |
-
-Diagrams are persisted to `.vscode/git-lore/diagrams/` and survive across sessions.
+### VS Code Extension
 
 ```bash
-# Development
-cd packages/desktop
-npm run dev          # Vite renderer + Electron main
-
-# Production build
-npm run build        # Vite build + esbuild bundle
-npm run dist         # electron-builder distributable
+git clone https://github.com/ami3g/GitLore.git
+cd GitLore
+npm install
+npm run compile
+# Press F5 → Extension Development Host
 ```
 
----
+### CLI
 
-## Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `gitlore.llmProvider` | `"ollama"` | `"ollama"` (fully local) or `"openai"` (cloud) |
-| `gitlore.ollamaEndpoint` | `http://localhost:11434` | Ollama server URL |
-| `gitlore.ollamaModel` | `llama3.2` | Ollama model name |
-| `gitlore.openaiModel` | `gpt-4o` | OpenAI model name |
-| `gitlore.commitDepth` | `1000` | Max commits to index (0 = unlimited) |
-| `gitlore.topK` | `5` | Results per query (small repos) |
-| `gitlore.githubRepo` | *(auto-detected)* | Override `owner/repo` for PR indexing |
-
-**CLI:** reads from `.gitlore.json` in the project root or environment variables (`OPENAI_API_KEY`, `GITHUB_TOKEN`, `GITLORE_LLM_PROVIDER`, `GITLORE_OLLAMA_MODEL`, etc.).
-
-### LLM Providers
-
-**Ollama (default — fully local & private):**
 ```bash
-ollama pull llama3.2
-# Git-Lore connects to http://localhost:11434 by default
+cd packages/cli && npm run build
+cd ~/your-project
+
+gitlore index --depth 1000                          # Index everything
+gitlore query "how does the auth middleware work?"   # Ask a question
+gitlore diagram architecture                         # Generate a diagram
+gitlore status                                       # Check index stats
 ```
-
-**OpenAI:**
-```bash
-# VS Code: run "Git-Lore: Set OpenAI API Key"
-# CLI: export OPENAI_API_KEY=sk-...
-```
-
-**GitHub Token (for PR indexing):**
-```bash
-# VS Code: stored in SecretStorage
-# CLI: export GITHUB_TOKEN=ghp_...
-```
-PR indexing works without a token on public repos (60 req/hr). For private repos or higher limits, provide a token. Commits + code always work without any token.
-
----
-
-## Query Pipeline Deep Dive
-
-Every question goes through a multi-stage retrieval pipeline designed to maximize the relevance and completeness of context sent to the LLM.
-
-### 1. Intent Classification
-
-The `IntentRouter` classifies each question into one of 5 intents using keyword analysis with soft-max blending:
-
-| Intent | Example Queries | Code Budget | Commit Budget |
-|--------|----------------|-------------|---------------|
-| **Implementation** | "how does login work?", "trace the request flow" | 80% | 20% |
-| **Overview** | "what is this project?", "describe the tech stack" | 70% | 30% |
-| **General** | "explain this module" | 50% | 50% |
-| **Historical** | "why was auth rewritten?", "who changed this?" | 20% | 80% |
-| **Debugging** | "what broke the tests?", "find the regression" | 20% | 80% |
-
-Each intent also controls per-source-type boost weights for reranking:
-
-| Intent | Commit Boost | Code Boost | PR Boost |
-|--------|-------------|------------|----------|
-| Overview | 0.6× | 1.8× | 0.7× |
-| Historical | 1.2× | 0.8× | 1.5× |
-| Implementation | 0.8× | 1.5× | 0.9× |
-| Debugging | 1.5× | 1.2× | 0.7× |
-| General | 1.0× | 1.0× | 1.0× |
-
-Each intent also controls **recency decay** — how aggressively stale commits and PRs are penalized during reranking:
-
-| Intent | Recency Decay | Rationale |
-|--------|--------------|-----------|
-| Implementation | 0.40 (strong) | Old commits about replaced code are hallucination fuel |
-| Overview | 0.30 (moderate) | Prefer the current state of the project |
-| General | 0.20 (light) | Mild preference for recent context |
-| Debugging | 0.15 (mild) | Recent regressions matter, but old root causes too |
-| Historical | 0.00 (none) | Old PRs and commits are exactly what was asked for |
-
-**Temporal anchoring:** When the query references a time period ("in 2022", "last year", "3 months ago"), the reranker switches from recency-from-now to **proximity-to-anchor** scoring. Results closest to the referenced era rank highest — both older and newer results are penalized proportionally. This works for all intents: "how did auth work in 2022?" prefers 2022-era commits even though it's an implementation query.
-
-Supported temporal patterns: bare years (`2022`), month+year (`March 2022`), relative (`3 months ago`, `last year`), and vague recency (`recently`, `lately`).
-
-Decay formula (no anchor): `distance × (1 + decayRate × min(ageYears / 2, 3))`.
-Proximity formula (with anchor): `distance × (1 + 0.50 × min(|distFromAnchor| / 1.5, 3))`.
-
-### 2. Vector Search (commits, code_files, pr_data) simultaneously. For large repos, code search is 60% directory-scoped (near the active file) + 40% global.
-
-### 3. Symbol Discovery & File Mention Extraction
-
-Before reranking, the pipeline extracts:
-- **Query symbols**: function names from `func()` syntax in the question (e.g. "res.json()" → `json`, `send`)
-- **Mentioned files**: file paths from the question (e.g. "lib/response.js")
-
-Chunks containing queried symbols get a 60% score boost. Chunks from mentioned files get a 70% boost. Mentioned files are force-expanded regardless of their vector rank.
-
-### 4. Smart File Expansion (Small-to-Big)
-
-Vector search finds the best 256-line chunk, then Git-Lore fetches **all chunks** for that file and reconstructs full context:
-- Implementation/overview/general: top **5 files** expanded
-- Historical/debugging: top **3 files** expanded
-- Each expanded file capped at **18,000 chars**
-
-Non-hit chunks are collapsed into one-line skeletons showing just their symbols:
-```
-// --- Lines 1-256: fn createApp() | fn lazyRouter() | imports: http, path ---
-```
-
-### 5. Cross-Symbol Contextual Expansion
-
-When the query mentions multiple related symbols (e.g. "trace res.json() through res.send()"), the pipeline force-expands **every chunk** that defines a queried symbol — even if they're in different 256-line windows of the same file. This ensures the LLM sees complete implementations, not just the chunk that scored highest.
-
-For nested closures (e.g. `next()` defined inside `handle()`), the pipeline detects parent-child function relationships using both AST metadata and content scanning, then expands all chunks belonging to the parent function.
-
-### 6. Structural Context (Call Graph + Freshness)
-
-For each expanded file, the pipeline injects a `[STRUCTURE]` block showing:
-- **Static call edges**: who this file calls, who calls it (up to 15 each)
-- **Co-change coupling**: files that historically change together (evolutionary coupling with recency decay, half-life = 365 days)
-- **Freshness labels**: last modified date + classification (Modern < 6mo, Recent 6-18mo, Stale > 18mo)
-
-### 7. Elastic Dual-Stream Budget
-
-Total prompt budget: **120,000 chars** (110K for snippets, 10K reserved for system prompt + history).
-
-The budget splits between code and commit streams based on intent:
-- Implementation query → 80% code / 20% commits
-- Historical query → 20% code / 80% commits
-
-Greedy filling: the primary stream fills first, then overflow spills into the secondary stream. No context is wasted.
-
-### 8. Anchor File Persistence
-
-For implementation/trace queries, the top 3 most-connected files in the call graph (highest degree centrality) are always included in the expansion set — even if their vector rank is low. This ensures "hub" files like `app.ts` or `index.js` are always visible to the LLM.
-
-### 9. Two-Pass File-System Agency (Synthesis)
-
-For "how"/"trace"/"flow" questions, the engine runs a **two-pass synthesis**:
-
-1. **Triage pass**: A lightweight LLM call reviews the initial context and decides which additional files need to be read (up to 5 files, 10K chars each).
-2. **File read pass**: The engine reads the requested files from disk (with path-traversal guards — no `..` escapes, no absolute paths, no symlinks).
-3. **Enriched prompt**: The additional file contents are injected into the prompt as a `[SYNTHESIS — ADDITIONAL FILES]` section.
-
-The synthesis pass enforces a **mandatory code-flow tracing format**: the LLM must produce a numbered call chain with `file:line` references showing how execution flows through the codebase.
-
-### 10. Context Reordering
-
-For synthesis questions, code snippets are placed **before** commit history in the prompt — the LLM sees the current implementation first, then the historical context. For historical/debugging questions, the default order (commits first) is preserved.
-
----
-
-## Indexing Pipeline
-
-### Code Indexing
-
-1. **File discovery**: `git ls-files` respects `.gitignore`, plus 57 exclusion rules (binaries, lockfiles, secrets, build outputs, `node_modules/`, `.git/`, etc.)
-2. **Chunking**: 256-line windows with 50-line overlap. Documentation files (README, CONTRIBUTING, etc.) use 1024-line windows.
-3. **AST parsing**: Each file is parsed with tree-sitter (9 languages). Functions, classes, imports, and exports are tagged onto each chunk with line-range intersection.
-4. **Hierarchical summaries** (large repos only): Files > 256 lines also get a summary chunk (head 80 + tail 40 lines + stats).
-5. **Embedding**: `[DEFINES] fn1, fn2 [IMPORTS] mod1, mod2 [EXPORTS] exp1` prepended to chunk text before embedding.
-6. **Incremental**: SHA-256 content hashes per file — only re-chunks/re-embeds changed files.
-
-### Commit Indexing
-
-1. **Extraction**: `git log` with file-level diffs (one chunk per file changed per commit).
-2. **Smart truncation**: Code files get 3,000 chars, medium files 1,500, config/docs 600.
-3. **Paged processing**: Async generator yields 200-commit pages — embed + write + discard per page (constant memory).
-4. **Incremental**: Tracks last indexed commit hash; new indexes start from where the previous one left off.
-5. **Rebase safety**: Verifies stored hash exists via `git cat-file`; auto-rebuilds if history was rewritten.
-
-### Call Graph
-
-1. **Static edges**: Tree-sitter AST → function definitions + call sites → 3-level resolution (same-file → import tracing → fuzzy method match).
-2. **Co-change edges**: Commit history → files that are often modified together → evolutionary coupling with exponential decay (half-life = 365 days).
-3. **Stored relationally**: The `call_graph` table has no vector column — just caller/callee file+name pairs.
-
-### PR/Issue Indexing
-
-1. **GitHub API**: Fetches all PRs (no page caps), descriptions, linked issues, merge metadata.
-2. **Small repos**: Concurrent page fetches (3 pages in parallel), eager issue title resolution.
-3. **Large repos**: Sequential fetches (rate-limit safe), issue numbers only.
-4. **Incremental**: Tracks last fetch timestamp; only fetches PRs merged after that date.
 
 ---
 
@@ -414,100 +162,308 @@ For synthesis questions, code snippets are placed **before** commit history in t
 ```
 gitlore/
 ├── packages/
-│   ├── core/                 @gitlore/core — framework-agnostic engine
-│   │   └── src/
-│   │       ├── services/
-│   │       │   ├── RAGEngine.ts         Orchestrator: index + query + summarize
-│   │       │   ├── IntentRouter.ts      5-intent classifier + elastic budgets
-│   │       │   ├── GitProcessor.ts      Git log extraction, file-level chunking
-│   │       │   ├── CodeIndexer.ts       Source file chunking + AST tagging
-│   │       │   ├── ASTService.ts        Tree-sitter parsing (9 languages)
-│   │       │   ├── CallGraphService.ts  Static + co-change call graph
-│   │       │   ├── MermaidService.ts    4 Mermaid diagram generators
-│   │       │   ├── GitHubService.ts     PR/issue fetching via Octokit
-│   │       │   ├── EmbeddingService.ts  all-MiniLM-L6-v2 (transformers.js)
-│   │       │   ├── VectorStore.ts       LanceDB (4 tables + SQ indices)
-│   │       │   └── llm/
-│   │       │       ├── OpenAIProvider.ts
-│   │       │       └── OllamaProvider.ts
-│   │       ├── types/index.ts
-│   │       └── config.ts
+│   ├── core/                   @gitlore/core — framework-agnostic engine
+│   │   └── src/services/
+│   │       ├── RAGEngine.ts            Orchestrator: index + query + synthesis
+│   │       ├── IntentRouter.ts         5-intent classifier + elastic budgets
+│   │       ├── GitProcessor.ts         Git log extraction, file-level chunking
+│   │       ├── CodeIndexer.ts          Source file chunking + AST tagging
+│   │       ├── ASTService.ts           tree-sitter parsing (9 languages)
+│   │       ├── CallGraphService.ts     Static + co-change call graph
+│   │       ├── MermaidService.ts       4 diagram generators
+│   │       ├── GitHubService.ts        PR/issue fetching (Octokit)
+│   │       ├── EmbeddingService.ts     all-MiniLM-L6-v2 (transformers.js)
+│   │       ├── VectorStore.ts          LanceDB (4 tables + HNSW-SQ)
+│   │       └── llm/
+│   │           ├── OpenAIProvider.ts
+│   │           └── OllamaProvider.ts
 │   │
-│   ├── vscode/               VS Code extension — thin config/UI layer
-│   │   ├── src/
-│   │   │   ├── extension.ts             Activation, commands, file watcher
-│   │   │   └── providers/
-│   │   │       └── ChatViewProvider.ts  Webview bridge, config injection
-│   │   └── webview/                     React 18 sidebar (Chat UI)
+│   ├── desktop/                Electron 33 + React 18 desktop app
+│   │   ├── main/               Main process (IPC handlers, preload bridge)
+│   │   ├── renderer/           Vite-powered React UI
+│   │   │   ├── pages/          Ask, Diagrams, Index, Settings
+│   │   │   └── components/     ChatMessage, DiagramViewer, Sidebar, TopKSelector
+│   │   └── shared/             Typed IPC channel definitions
 │   │
-│   ├── desktop/              Electron desktop app
-│   │   ├── main/
-│   │   │   ├── electron.ts              Main process entry
-│   │   │   ├── ipc-handlers.ts          IPC bridge (query, index, diagrams, config)
-│   │   │   └── preload.ts               Context bridge for renderer
-│   │   ├── renderer/
-│   │   │   ├── pages/                   Ask, Diagrams, Index, Settings
-│   │   │   ├── components/              ChatMessage, DiagramViewer, Sidebar, etc.
-│   │   │   └── styles/global.css        Dark theme
-│   │   ├── shared/ipc-types.ts          Typed IPC channel definitions
-│   │   ├── esbuild.js                   ESM→CJS bundler for main process
-│   │   └── vite.config.ts              Renderer dev server
+│   ├── vscode/                 VS Code extension (webview + commands)
+│   │   ├── src/                Extension host (activation, file watcher)
+│   │   └── webview/            React 18 sidebar UI
 │   │
-│   └── cli/                  Terminal tool
-│       └── src/index.ts                 Commander entry point
+│   └── cli/                    Commander-based terminal tool
 │
-├── package.json              npm workspaces root
+├── package.json                npm workspaces root
 └── tsconfig.base.json
 ```
 
-### Data Flow
+### Monorepo Design
 
-**Indexing** (one-time, then incremental):
+The core RAG engine (`@gitlore/core`) is entirely framework-agnostic — no dependency on Electron, VS Code, or any UI framework. All three consumers (desktop, extension, CLI) import the same `RAGEngine` class and compose it with their own I/O layer:
+
+```mermaid
+graph LR
+    subgraph Core["@gitlore/core"]
+        RAG["RAGEngine"]
+        VS["VectorStore"]
+        EMB["EmbeddingService"]
+        AST["ASTService"]
+        LLM["LLM Providers"]
+    end
+
+    subgraph Consumers["Consumers"]
+        DT["Desktop App<br/><small>Electron · IPC bridge</small>"]
+        EXT["VS Code Extension<br/><small>Webview · SecretStorage</small>"]
+        CLI["CLI Tool<br/><small>Commander · stdout</small>"]
+    end
+
+    DT --> RAG
+    EXT --> RAG
+    CLI --> RAG
+    RAG --> VS
+    RAG --> EMB
+    RAG --> AST
+    RAG --> LLM
+
+    style Core fill:#0f172a,stroke:#475569,color:#e2e8f0
+    style Consumers fill:#1e293b,stroke:#334155,color:#e2e8f0
+```
+
+---
+
+## Query Pipeline
+
+Every question passes through a 10-stage retrieval pipeline before reaching the LLM.
+
+### Stage 1 — Intent Classification
+
+The `IntentRouter` classifies each question into one of 5 intents, which controls budget allocation, reranking weights, and recency decay:
+
+| Intent | Budget Split (Code / Commits) | Recency Decay | Example |
+|--------|-------------------------------|---------------|---------|
+| **Implementation** | 80% / 20% | Strong (0.40) | "How does login work?" |
+| **Overview** | 70% / 30% | Moderate (0.30) | "What is this project?" |
+| **General** | 50% / 50% | Light (0.20) | "Explain this module" |
+| **Debugging** | 20% / 80% | Mild (0.15) | "What broke the tests?" |
+| **Historical** | 20% / 80% | None (0.00) | "Why was auth rewritten?" |
+
+**Temporal anchoring:** Queries referencing a time period ("in 2022", "last month") switch from recency-from-now to **proximity-to-anchor** scoring — results closest to the referenced era rank highest.
+
+### Stage 2 — Parallel Vector Search
+
+Three simultaneous searches across `commits`, `code_files`, and `pr_data` tables. For large repos, code search is 60% directory-scoped + 40% global.
+
+### Stage 3 — Symbol Discovery
+
+Extracts function names (`res.json()` → `json`) and file paths from the query. Matching chunks receive a 60–70% score boost.
+
+### Stage 4 — Intent-Weighted Reranking
+
+Results are reranked using per-intent boost weights (e.g., implementation queries boost code 1.5×, suppress commits 0.8×) and temporal decay.
+
+### Stage 5 — Smart File Expansion (Small-to-Big)
+
+The highest-ranked 256-line chunk triggers expansion of **all chunks** for that file, reconstructing full context. Non-hit regions collapse to one-line skeletons:
 
 ```
-git log ──→ GitProcessor ──→ CommitChunks ────┐
-                                               │
-git ls-files ──→ CodeIndexer ──┐               ├─→ EmbeddingService ──→ VectorStore
-                               │               │         (LanceDB)
-            ASTService ────────┤               │
-            (tree-sitter)      │               │
-                               ▼               │
-                          CodeChunks ──────────┘
-                          (AST-tagged)         │
-                                               │
-GitHub API ──→ GitHubService ──→ PRChunks ─────┘
-                                               │
-ASTService ──→ CallGraphService ──→ CallEdges ─┘
-                (static + co-change)
+// --- Lines 1-256: fn createApp() | fn lazyRouter() | imports: http, path ---
 ```
 
-**Querying** (every question):
+### Stage 6 — Cross-Symbol Expansion
 
-```
-Question
-  │
-  ├── embed(question)
-  │     ├── search(commits)
-  │     ├── searchCode(code_files)  ← directory-scoped for large repos
-  │     └── searchPR(pr_data)
-  │
-  ├── IntentRouter.classify(question) → weights + codeBudgetRatio
-  │
-  ├── Symbol discovery: extract function names + file paths from question
-  │     └── Boost matching chunks (60% symbol, 70% file mention)
-  │
-  ├── Rerank all results by intent-weighted distance
-  │
-  ├── Smart expansion: top N files → all chunks → full context
-  │     ├── Cross-symbol expansion (json → send in same file)
-  │     ├── Parent-function expansion (next inside handle)
-  │     └── Anchor files: top 3 hub files by call-graph degree
-  │
-  ├── Structural context: call edges + co-change + freshness per file
-  │
-  ├── Elastic budget: code + commit streams filled per intent ratio
-  │
-  └── buildPrompt() → LLM → streamed answer with citations
+When multiple symbols are queried (e.g., "trace `res.json()` through `res.send()`"), both implementations are force-expanded — even if they're in different chunk windows. Nested closures (e.g., `next()` inside `handle()`) trigger parent-function expansion.
+
+### Stage 7 — Structural Context Injection
+
+Each expanded file receives a `[STRUCTURE]` block: static call edges, co-change coupling (evolutionary coupling with 365-day half-life decay), and freshness labels (Modern / Recent / Stale).
+
+### Stage 8 — Elastic Dual-Stream Budget
+
+Total budget: **120,000 chars** (110K for snippets). The primary stream (per intent) fills first; overflow spills into the secondary stream. No context is wasted.
+
+### Stage 9 — Two-Pass Synthesis (File-System Agency)
+
+For "how" / "trace" / "flow" questions, a lightweight triage LLM call reviews the initial context and requests up to 5 additional files from disk. The engine reads them (with path-traversal guards) and injects them as a `[SYNTHESIS — ADDITIONAL FILES]` section.
+
+### Stage 10 — Context Reordering
+
+For synthesis questions, code snippets are placed **before** commit history — the LLM sees current implementation first. For historical queries, commit context leads.
+
+---
+
+## Indexing Pipeline
+
+### Code Indexing
+- **File discovery**: `git ls-files` + 57 exclusion rules (binaries, lockfiles, `node_modules/`, etc.)
+- **Chunking**: 256-line windows with 50-line overlap; docs use 1024-line windows
+- **AST tagging**: tree-sitter parses 9 languages (TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, TSX) — functions, classes, imports, and exports attached to each chunk
+- **Embedding enrichment**: `[DEFINES] fn1, fn2 [IMPORTS] mod1 [EXPORTS] exp1` prepended before embedding
+- **Incremental**: SHA-256 content hashes — only changed files are re-indexed
+
+### Commit Indexing
+- **Extraction**: `git log` with file-level diffs (one chunk per file per commit)
+- **Smart truncation**: Code files → 3,000 chars, config/docs → 600 chars
+- **Paged processing**: 200-commit pages via async generator (constant memory)
+- **Rebase safety**: Verifies stored commit hash via `git cat-file`; auto-rebuilds on rewritten history
+
+### Call Graph
+- **Static edges**: tree-sitter AST → function definitions + call sites → 3-level resolution (same-file → import tracing → fuzzy match)
+- **Co-change edges**: Files frequently modified together → evolutionary coupling with exponential decay
+- **Relational storage**: No vector column — just caller/callee file+name pairs in LanceDB
+
+### PR/Issue Indexing
+- **GitHub API**: All PRs, descriptions, linked issues, merge metadata
+- **Adaptive throughput**: Small repos use 3-way concurrent page fetches; large repos go sequential for rate-limit safety
+- **Incremental**: Tracks last fetch timestamp; only new PRs are re-fetched
+
+---
+
+## Desktop App
+
+| Page | Features |
+|------|----------|
+| **Ask** | Streaming chat, adjustable TopK (5–50), markdown rendering with syntax highlighting |
+| **Diagrams** | 4 Mermaid diagram types with zoom/pan/pinch, auto-save, load/delete saved diagrams |
+| **Index** | Select any local repo, full or code-only indexing with live progress |
+| **Settings** | LLM provider toggle (OpenAI/Ollama), model selection, API key management |
+
+Diagrams are persisted to `.vscode/git-lore/diagrams/` across sessions.
+
+---
+
+## VS Code Extension
+
+| Command | Description |
+|---------|-------------|
+| **Git-Lore: Index Repository** | Full pipeline: commits + code + PRs + call graph |
+| **Git-Lore: Index Code Files** | Incremental source file re-index |
+| **Git-Lore: Clear Index** | Delete the local vector database |
+| **Git-Lore: Set OpenAI API Key** | Store key securely in VS Code SecretStorage |
+| **Git-Lore: What's Changed?** | Standup summary of recent commits |
+| **Git-Lore: Explain This Change** | Right-click a line → blame → RAG query |
+
+The extension watches `.git/refs/` for pushes, pulls, and local commits — prompting to update the index automatically.
+
+---
+
+## CLI Reference
+
+| Command | Description | Key Options |
+|---------|-------------|-------------|
+| `gitlore index` | Full indexing pipeline | `--depth <n>` (default: 1000) |
+| `gitlore index-code` | Re-index source files only | — |
+| `gitlore index-prs` | Re-index PRs from GitHub | — |
+| `gitlore query <question>` | Ask a question | `--top-k <n>` (default: 10) |
+| `gitlore diagram <type>` | Generate Mermaid diagram | `architecture`, `callgraph`, `commits`, `prs` |
+| `gitlore standup` | Summarize recent changes | — |
+| `gitlore status` | Show index statistics | — |
+| `gitlore config show` | Display current configuration | — |
+| `gitlore config set <key> <val>` | Update a setting | `llmProvider`, `openaiModel`, `ollamaModel`, etc. |
+| `gitlore config reset` | Revert to defaults | — |
+| `gitlore info` | Show all commands and env vars | — |
+| `gitlore clear` | Delete the local index | — |
+
+---
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `llmProvider` | `ollama` | `ollama` (fully local) or `openai` (cloud) |
+| `ollamaEndpoint` | `http://localhost:11434` | Ollama server URL |
+| `ollamaModel` | `llama3.2` | Ollama model name |
+| `openaiModel` | `gpt-4o` | OpenAI model name |
+| `commitDepth` | `1000` | Max commits to index (0 = unlimited) |
+| `topK` | `5` | Results per query |
+
+**Environment variables:** `OPENAI_API_KEY`, `GITHUB_TOKEN`, `GITLORE_LLM_PROVIDER`, `GITLORE_OLLAMA_MODEL`
+
+PR indexing works without a token on public repos. Commits + code always work without any external API.
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| Embedding | `@huggingface/transformers` | all-MiniLM-L6-v2, 384-dim, q8 quantized — runs in Node.js |
+| Vector DB | `@lancedb/lancedb` | 4 tables, HNSW-SQ indexing, in-process (no server) |
+| AST Parsing | `web-tree-sitter` | 9 languages: TS, TSX, JS, Python, Go, Rust, Java, C, C++ |
+| Git | `simple-git` | Commit log, diffs, blame, ls-files |
+| GitHub | `@octokit/rest` | PR descriptions, linked issues, merge metadata |
+| LLM | OpenAI SDK / Ollama REST | Streaming completions (cloud or fully local) |
+| Desktop | Electron 33 + React 18 + Vite 6 | IPC bridge, dark theme, zoom/pan diagrams |
+| Extension | VS Code Webview API + React 18 | Sidebar chat, SecretStorage, file watcher |
+| CLI | Commander | Terminal commands with streaming output |
+| Diagrams | Mermaid 11 | Architecture, call graph, commit timeline, PR flow |
+| Bundler | esbuild | ESM→CJS for Electron main process |
+
+### Scaling Behavior
+
+| | Small Repos | Large Repos (5K+ commits) |
+|---|------------|--------------------------|
+| **Vector index** | Brute-force | HNSW-SQ (scalar quantization) |
+| **Code search** | Global top-K | 60% directory-scoped + 40% global |
+| **Code chunks** | 256-line windows | + hierarchical file summaries |
+| **Memory** | Standard | Paged processing (constant memory) |
+
+All commits, all code, all PRs are indexed at every scale. The scaling strategy is smarter search, not less data.
+
+---
+
+## Battle-Tested: Express.js Stress Tests
+
+Validated against the **Express.js repository** — 12,889 commits, 116 source files, 2,443 PRs, 11,404 call graph edges. Each test targets a known failure mode of standard RAG systems.
+
+### Closure Identification
+**Query:** "Trace the `next()` iterator inside `lib/router/index.js`"
+
+`next` is a closure inside `proto.handle`, not a top-level function. Standard RAG grabs a 20-line snippet and loses the loop context. GitLore's parent-function expansion detected the nesting and expanded the entire `while` loop + recursive dispatch logic.
+
+### Cross-File Dependency Tracing
+**Query:** "Trace a request from `express.js` → `application.js` → `response.js`"
+
+Requires understanding prototype injection (`Object.setPrototypeOf`). Anchor file persistence forced expansion of hub files by call-graph degree centrality, surfacing the prototype chain.
+
+### Historical Narrative Recovery
+**Query:** "What security changes were made? Was there a reverted CVE patch?"
+
+The elastic budget flipped to 80% commits / 20% code, surfacing PR discussions and commit messages explaining *why* CVE-2024-51999 was reverted — the narrative behind the code.
+
+### Cross-Symbol Handoff
+**Query:** "Trace `res.json()` through `res.send()`"
+
+These functions are hundreds of lines apart in the same file. Symbol discovery identified both; cross-symbol expansion force-expanded both chunks, showing how `res.json()` pre-sets `Content-Type` before `res.send()` serializes.
+
+---
+
+## Privacy & Security
+
+- **Embeddings run 100% locally** — transformers.js in Node.js, no external API calls during indexing
+- **Vector search is 100% local** — LanceDB runs in-process with no server
+- **Only top-K snippets reach the LLM** — raw diffs, full source files, and the vector database never leave your machine
+- **API keys stored securely** — VS Code SecretStorage for the extension, environment variables for CLI
+- **Path traversal guards** — synthesis pass rejects `..`, absolute paths, and symlinks
+- **No telemetry, no analytics, no cloud dependencies** (except the LLM API call when using OpenAI)
+
+---
+
+## Development
+
+```bash
+npm install                          # Install all workspaces
+
+# Core
+npm run build:core                   # Build @gitlore/core
+
+# Desktop
+npm run dev:desktop                  # Vite renderer + Electron main (hot reload)
+npm run compile:desktop              # Production build
+
+# VS Code Extension
+npm run compile                      # Build core + extension + webview
+# Press F5 in VS Code → Extension Development Host
+
+# CLI
+cd packages/cli && npm run build     # Build CLI
 ```
 
 ### Local Storage
@@ -515,120 +471,16 @@ Question
 ```
 .vscode/git-lore/
 ├── db/                LanceDB vector database (4 tables)
-├── grammars/          Cached tree-sitter WASM grammars (~1MB each)
-├── models/            Cached embedding model (~80MB, downloaded once)
+├── grammars/          tree-sitter WASM grammars (~1MB each)
+├── models/            Embedding model (~80MB, downloaded once)
+├── diagrams/          Saved Mermaid diagrams (desktop app)
 ├── index-meta.json    Last indexed commit hash
-├── code-meta.json     File content hashes (incremental code)
+├── code-meta.json     File content hashes (incremental)
 ├── pr-meta.json       Last PR fetch timestamp
-└── sq-enabled         Marker file when SQ indices are active
+└── sq-enabled         Marker: SQ indices active
 ```
 
 Add `.vscode/git-lore/` to your `.gitignore`.
-
----
-
-## Tech Stack
-
-| Component | Library | Role |
-|-----------|---------|------|
-| Git extraction | `simple-git` | Commit log, diffs, blame, ls-files |
-| AST parsing | `web-tree-sitter` | 9 languages: TS, TSX, JS, Python, Go, Rust, Java, C, C++ |
-| Embeddings | `@huggingface/transformers` | all-MiniLM-L6-v2, 384-dim, q8 quantized, runs in Node.js |
-| Vector DB | `@lancedb/lancedb` | 4 tables, HNSW-SQ indexing, in-process (no server) |
-| GitHub API | `@octokit/rest` | PR descriptions, linked issues, merge metadata |
-| LLM (local) | Ollama REST API | NDJSON streaming, any local model |
-| LLM (cloud) | `openai` SDK | Streaming chat completions |
-| CLI | `commander` | Terminal commands |
-| UI | React 18 + Vite | VS Code sidebar + desktop app |
-| Desktop | Electron 33 | Standalone app with IPC bridge |
-| Diagrams | Mermaid 11 | Architecture, callgraph, commit, PR diagrams |
-| Markdown | react-markdown + remark-gfm | Chat message rendering |
-| Bundler | esbuild | Node CJS bundle, LanceDB external |
-
-### Large Repo Scaling
-
-Repos with 5,000+ commits are automatically handled differently:
-
-| Feature | Small Repos | Large Repos (5K+ commits) |
-|---------|------------|--------------------------|
-| Code chunks | 256-line windows | + file-level summary chunks |
-| Vector index | Brute-force search | HNSW-SQ (scalar quantization) on 10K+ row tables |
-| Search scope | Global top-K | 60% directory-scoped + 40% global |
-| PR fetching | 3 pages concurrent, eager issue titles | Sequential, issue numbers only |
-| Query breadth | `topK` from config | Fixed 10 — focused + aggressive reranking |
-
-**No data truncation at any scale.** All commits, all code, all PRs are indexed. The scaling strategy is smarter search, not less data.
-
----
-
-## Battle-Tested: Express.js Stress Tests
-
-Git-Lore was validated against the **Express.js repository** (12,889 commits, 116 source files, 2,443 PRs, 11,404 call graph edges) — one of the most architecturally complex Node.js projects. Each test targets a known failure mode of standard RAG systems.
-
-### 1. The "Ghost in the Machine" Test — Closure Identification
-
-**Challenge:** Trace the `next()` iterator inside `lib/router/index.js`.
-
-In Express, `next` isn't a top-level function — it's a closure buried deep inside `proto.handle`. Most RAG systems grab a random 20-line snippet and lose the surrounding loop context entirely.
-
-**Result:** Contextual Expansion (Step 4) detected that `next()` is defined inside `proto.handle`, walked up to the parent function, and expanded the entire `while` loop plus the recursive dispatch logic. The LLM correctly identified that Express 4.x routing is entirely synchronous.
-
-### 2. The "Architecture Trace" Test — Cross-File Dependency
-
-**Challenge:** Trace a request from `express.js` → `application.js` → `response.js`.
-
-This requires the engine to understand **prototype injection** — `res.send()` is defined in `response.js` but "magically" attached to the app object in `application.js` via `Object.setPrototypeOf`.
-
-**Result:** Anchor File Persistence (Step 4b) forced expansion of the top hub files by call-graph degree centrality. The LLM saw the `Object.setPrototypeOf` calls that wire the three files together, and correctly explained the prototype chain.
-
-### 3. The "Historical Narrative" Test — The Budget Flip
-
-**Challenge:** Identify security changes and the reverted CVE-2024-51999 patch.
-
-Standard RAG only looks at the current code. It has no awareness that a security patch was added and then *removed* because it was erroneous.
-
-**Result:** The Elastic Budget (Step 7) flipped to 80% commits / 20% code for this historical query. The engine surfaced the PR discussions and commit messages that explained *why* the patch was reverted — the narrative behind the code, not just the code itself.
-
-### 4. The "Logical Handoff" Test — Symbol Discovery
-
-**Challenge:** Trace `res.json()` through `res.send()`.
-
-These functions live in the same file but hundreds of lines apart. Standard 256-line chunking provides one or the other, but rarely both in a way that shows the handoff.
-
-**Result:** Symbol Discovery (Step 3) identified both `json` and `send` as queried symbols. Cross-Symbol Expansion (Step 5) force-expanded both chunks regardless of their vector rank. The LLM explained how `res.json()` pre-sets the `Content-Type` header before `res.send()` begins serialization.
-
----
-
-## Privacy & Security
-
-- **Embeddings are 100% local** — transformers.js runs all-MiniLM-L6-v2 in Node.js. No data leaves your machine during indexing.
-- **Vector search is 100% local** — LanceDB runs in-process with no server.
-- **Only top-K snippets go to the LLM** — typically 20-30 snippets plus your question. Raw diffs, full source files, and the vector database never leave your machine.
-- **API keys stored securely** — VS Code SecretStorage for the extension, environment variables for CLI.
-- **No telemetry, no analytics, no cloud services** — everything runs on your hardware (except the LLM API call if using OpenAI).
-
----
-
-## Development
-
-```bash
-# Install all dependencies (npm workspaces)
-npm install
-
-# Build everything (core → extension → webview)
-npm run compile
-
-# Watch extension (Node side)
-npm run watch:extension
-
-# Watch webview (React side)
-npm run dev:webview
-
-# Type-check core
-cd packages/core && npx tsc --noEmit
-
-# Launch extension: press F5 in VS Code
-```
 
 ---
 
