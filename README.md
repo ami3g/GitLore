@@ -1,6 +1,6 @@
 # Git-Lore
 
-**Chat with your repository's entire history, codebase, and PRs.** Privacy-first, RAG-powered project intelligence — as a VS Code extension or CLI tool.
+**Chat with your repository's entire history, codebase, and PRs.** Privacy-first, RAG-powered project intelligence — as a VS Code extension, CLI tool, or Electron desktop app.
 
 Git-Lore indexes your commit history, current source files, GitHub PRs, and the static call graph into a local vector database, then answers natural-language questions backed by real evidence from your repo. Embeddings and vector search run entirely on your machine — only the final top-K snippets are sent to the LLM.
 
@@ -12,6 +12,7 @@ Git-Lore indexes your commit history, current source files, GitHub PRs, and the 
 - [Quick Start](#quick-start)
 - [CLI Reference](#cli-reference)
 - [VS Code Extension](#vs-code-extension)
+- [Desktop App](#desktop-app)
 - [Configuration](#configuration)
 - [Query Pipeline Deep Dive](#query-pipeline-deep-dive)
 - [Indexing Pipeline](#indexing-pipeline)
@@ -123,6 +124,22 @@ npm run compile
 3. Click **"Index Repo"** — indexes commits + code + PRs + call graph
 4. Ask questions in the chat sidebar
 
+### Desktop App (Electron)
+
+```bash
+git clone https://github.com/ami3g/GitLore.git
+cd GitLore
+npm install
+npm run -w @gitlore/core build
+cd packages/desktop
+npm run dev
+```
+
+1. Set your API key and model in **Settings**
+2. Navigate to **Index** → select a repo folder → index it
+3. Ask questions in **Ask** with adjustable TopK
+4. Generate Mermaid architecture/callgraph/commit/PR diagrams in **Diagrams**
+
 ### CLI Tool
 
 ```bash
@@ -160,6 +177,10 @@ gitlore status
 | `gitlore diagram callgraph` | Mermaid call graph | `--entry <function>` |
 | `gitlore diagram commits` | Mermaid commit timeline | `--limit <n>` (default: 30) |
 | `gitlore diagram prs` | Mermaid PR/issue flow | — |
+| `gitlore config show` | Show current configuration (file + env vars) | — |
+| `gitlore config set <key> <value>` | Set a config value in `.gitlore.json` | Keys: `llmProvider`, `openaiModel`, `ollamaEndpoint`, `ollamaModel`, `commitDepth`, `topK`, `githubRepo` |
+| `gitlore config reset` | Delete `.gitlore.json` and revert to defaults | — |
+| `gitlore info` | Show all available commands, settings, and env vars | — |
 
 All diagram commands output Mermaid syntax to stdout — pipe to a file or clipboard.
 
@@ -181,6 +202,31 @@ All diagram commands output Mermaid syntax to stdout — pipe to a file or clipb
 ### Live Commit Detection
 
 The extension watches `.git/refs/` for changes (push, pull, fetch, local commits). When new commits are detected, it prompts: "New commits detected. Update the index?" — keeping your index fresh without manual re-runs.
+
+---
+
+## Desktop App
+
+The Electron desktop app provides the same RAG engine in a standalone window with a richer UI:
+
+| Page | Features |
+|------|----------|
+| **Ask** | Streaming chat, adjustable TopK (5-50), markdown rendering with syntax highlighting |
+| **Diagrams** | Generate architecture/callgraph/commit/PR Mermaid diagrams, zoom/pan/pinch, auto-save, load/delete saved diagrams |
+| **Index** | Select any local repo, run full or code-only indexing with progress |
+| **Settings** | LLM provider (OpenAI/Ollama), model selection, API key, Ollama endpoint |
+
+Diagrams are persisted to `.vscode/git-lore/diagrams/` and survive across sessions.
+
+```bash
+# Development
+cd packages/desktop
+npm run dev          # Vite renderer + Electron main
+
+# Production build
+npm run build        # Vite build + esbuild bundle
+npm run dist         # electron-builder distributable
+```
 
 ---
 
@@ -313,6 +359,20 @@ Greedy filling: the primary stream fills first, then overflow spills into the se
 
 For implementation/trace queries, the top 3 most-connected files in the call graph (highest degree centrality) are always included in the expansion set — even if their vector rank is low. This ensures "hub" files like `app.ts` or `index.js` are always visible to the LLM.
 
+### 9. Two-Pass File-System Agency (Synthesis)
+
+For "how"/"trace"/"flow" questions, the engine runs a **two-pass synthesis**:
+
+1. **Triage pass**: A lightweight LLM call reviews the initial context and decides which additional files need to be read (up to 5 files, 10K chars each).
+2. **File read pass**: The engine reads the requested files from disk (with path-traversal guards — no `..` escapes, no absolute paths, no symlinks).
+3. **Enriched prompt**: The additional file contents are injected into the prompt as a `[SYNTHESIS — ADDITIONAL FILES]` section.
+
+The synthesis pass enforces a **mandatory code-flow tracing format**: the LLM must produce a numbered call chain with `file:line` references showing how execution flows through the codebase.
+
+### 10. Context Reordering
+
+For synthesis questions, code snippets are placed **before** commit history in the prompt — the LLM sees the current implementation first, then the historical context. For historical/debugging questions, the default order (commits first) is preserved.
+
 ---
 
 ## Indexing Pipeline
@@ -379,6 +439,19 @@ gitlore/
 │   │   │   └── providers/
 │   │   │       └── ChatViewProvider.ts  Webview bridge, config injection
 │   │   └── webview/                     React 18 sidebar (Chat UI)
+│   │
+│   ├── desktop/              Electron desktop app
+│   │   ├── main/
+│   │   │   ├── electron.ts              Main process entry
+│   │   │   ├── ipc-handlers.ts          IPC bridge (query, index, diagrams, config)
+│   │   │   └── preload.ts               Context bridge for renderer
+│   │   ├── renderer/
+│   │   │   ├── pages/                   Ask, Diagrams, Index, Settings
+│   │   │   ├── components/              ChatMessage, DiagramViewer, Sidebar, etc.
+│   │   │   └── styles/global.css        Dark theme
+│   │   ├── shared/ipc-types.ts          Typed IPC channel definitions
+│   │   ├── esbuild.js                   ESM→CJS bundler for main process
+│   │   └── vite.config.ts              Renderer dev server
 │   │
 │   └── cli/                  Terminal tool
 │       └── src/index.ts                 Commander entry point
@@ -466,7 +539,10 @@ Add `.vscode/git-lore/` to your `.gitignore`.
 | LLM (local) | Ollama REST API | NDJSON streaming, any local model |
 | LLM (cloud) | `openai` SDK | Streaming chat completions |
 | CLI | `commander` | Terminal commands |
-| UI | React 18 + Vite | VS Code sidebar chat interface |
+| UI | React 18 + Vite | VS Code sidebar + desktop app |
+| Desktop | Electron 33 | Standalone app with IPC bridge |
+| Diagrams | Mermaid 11 | Architecture, callgraph, commit, PR diagrams |
+| Markdown | react-markdown + remark-gfm | Chat message rendering |
 | Bundler | esbuild | Node CJS bundle, LanceDB external |
 
 ### Large Repo Scaling
