@@ -20,14 +20,25 @@ Chat with your codebase, commit history, and pull requests — backed by local e
 
 ## Why GitLore?
 
-Most AI code assistants only see the file you have open. GitLore indexes your **entire repository** — every commit, every source file, every PR — into a local vector database and answers questions with real evidence.
+Your repository already contains the answers — buried in thousands of commits, PR discussions, and code changes that no one remembers. GitLore makes that institutional knowledge queryable.
 
+**Understand the "why" behind every decision.** A codebase isn't just what the code does today — it's the history of every choice that shaped it. GitLore indexes your entire repository (commits, source files, PRs) into a local vector database so you can ask:
+
+- **"Why does this function exist?"** → Surfaces the original commit, the PR discussion, and the problem it was solving
+- **"Why did the team choose Redis over Memcached?"** → Finds the PR where the decision was debated and the commit where it was implemented
+- **"Who built the payment flow and who should I ask about it?"** → Identifies the authors, reviewers, and most recent contributors
+- **"What broke in the last deploy?"** → Flips to 80% commit history retrieval and traces the regression
 - **"How does the auth middleware work?"** → Traces the call chain across files with `file:line` references
-- **"Who rewrote the payment flow and why?"** → Surfaces the PR discussions and commit messages
-- **"What broke the tests last week?"** → Flips the retrieval budget to 80% commit history
-- **"Show me the architecture"** → Generates a Mermaid diagram from the actual call graph
 
-**Privacy-first:** Embeddings and vector search run entirely on your machine. Only the final top-K snippets are sent to the LLM.
+### Onboard developers in hours, not weeks
+
+New team members don't need to reverse-engineer the codebase or interrupt senior devs. They can ask GitLore why a module is structured a certain way, who owns which subsystem, and what the original design intent was — all backed by actual commits and PR conversations, not tribal knowledge.
+
+### Context distillation — make every LLM token count
+
+When you paste code into Claude or GPT, you're spending tokens on context that may not matter. GitLore's 10-stage retrieval pipeline acts as a **context distillation layer**: it classifies your question's intent, searches across three data streams (code, commits, PRs), reranks by relevance, and delivers only the most targeted snippets to the LLM. Every token in the prompt is code and history that actually matters to your specific query — not a raw file dump.
+
+**Privacy-first:** Embeddings and vector search run entirely on your machine. Only the final distilled context is sent to the LLM.
 
 ### Key Engineering Decisions
 
@@ -39,6 +50,7 @@ Most AI code assistants only see the file you have open. GitLore indexes your **
 | Old commits pollute results for "how does X work?" | **Temporal reranking** with intent-specific recency decay and anchor-based proximity scoring |
 | Large repos (10K+ commits) are too slow | **HNSW-SQ indices**, directory-scoped search, paged processing with constant memory |
 | LLM answers lack traceability | **Mandatory code-flow format** with numbered call chains and `file:line` citations |
+| Pasting raw files wastes LLM tokens on irrelevant code | **Context distillation** — intent-aware retrieval delivers only the snippets that matter |
 
 ---
 
