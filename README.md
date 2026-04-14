@@ -59,18 +59,18 @@ When you paste code into Claude or GPT, you're spending tokens on context that m
 ```mermaid
 graph TB
     subgraph Sources["Data Sources"]
-        GL["Git Log<br/><small>commits + diffs</small>"]
-        SF["Source Files<br/><small>git ls-files</small>"]
-        GH["GitHub API<br/><small>PRs + issues</small>"]
+        GL["Git Log\ncommits + diffs"]
+        SF["Source Files\ngit ls-files"]
+        GH["GitHub API\nPRs + issues"]
     end
 
     subgraph Indexing["Indexing Pipeline"]
-        GP["GitProcessor<br/><small>file-level diff chunks</small>"]
-        CI["CodeIndexer<br/><small>256-line windows + overlap</small>"]
-        GS["GitHubService<br/><small>PR descriptions + metadata</small>"]
-        AST["ASTService<br/><small>tree-sitter · 9 languages</small>"]
-        CG["CallGraphService<br/><small>static + co-change edges</small>"]
-        EMB["EmbeddingService<br/><small>all-MiniLM-L6-v2 · 384-dim</small>"]
+        GP["GitProcessor\nfile-level diff chunks"]
+        CI["CodeIndexer\n256-line windows + overlap"]
+        GS["GitHubService\nPR descriptions + metadata"]
+        AST["ASTService\ntree-sitter · 9 languages"]
+        CG["CallGraphService\nstatic + co-change edges"]
+        EMB["EmbeddingService\nall-MiniLM-L6-v2 · 384-dim"]
     end
 
     subgraph Storage["Vector Store · LanceDB"]
@@ -81,19 +81,19 @@ graph TB
     end
 
     subgraph Query["10-Stage Query Pipeline"]
-        IR["Intent Router<br/><small>5 intents · budget allocation</small>"]
-        VS["Vector Search<br/><small>3 tables · directory-scoped</small>"]
-        SD["Symbol Discovery<br/><small>function + file extraction</small>"]
-        RR["Reranker<br/><small>temporal decay · boost weights</small>"]
-        EX["Smart Expansion<br/><small>Small-to-Big · cross-symbol</small>"]
-        SC["Structural Context<br/><small>call graph + freshness</small>"]
-        BF["Budget Filler<br/><small>elastic dual-stream</small>"]
-        SY["Synthesis Pass<br/><small>two-pass file-system agency</small>"]
+        IR["Intent Router\n5 intents · budget allocation"]
+        VS["Vector Search\n3 tables · directory-scoped"]
+        SD["Symbol Discovery\nfunction + file extraction"]
+        RR["Reranker\ntemporal decay · boost weights"]
+        EX["Smart Expansion\nSmall-to-Big · cross-symbol"]
+        SC["Structural Context\ncall graph + freshness"]
+        BF["Budget Filler\nelastic dual-stream"]
+        SY["Synthesis Pass\ntwo-pass file-system agency"]
     end
 
     subgraph Output["Output"]
-        LLM["LLM<br/><small>OpenAI · Ollama</small>"]
-        ANS["Streamed Answer<br/><small>with citations</small>"]
+        LLM["LLM\nOpenAI · Ollama"]
+        ANS["Streamed Answer\nwith citations"]
     end
 
     GL --> GP --> EMB
@@ -222,9 +222,9 @@ graph LR
     end
 
     subgraph Consumers["Consumers"]
-        DT["Desktop App<br/><small>Electron · IPC bridge</small>"]
-        EXT["VS Code Extension<br/><small>Webview · SecretStorage</small>"]
-        CLI["CLI Tool<br/><small>Commander · stdout</small>"]
+        DT["Desktop App\nElectron · IPC bridge"]
+        EXT["VS Code Extension\nWebview · SecretStorage"]
+        CLI["CLI Tool\nCommander · stdout"]
     end
 
     DT --> RAG
