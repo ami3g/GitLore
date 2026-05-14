@@ -39,14 +39,18 @@ program
   .version('0.2.0');
 
 program
-  .command('index')
-  .description('Index the current repository')
+  .command('index [repoPath]')
+  .description('Index a repository (defaults to current directory)')
   .option('-d, --depth <number>', 'Number of commits to index', '1000')
-  .action(async (opts) => {
+  .option('-t, --token <token>', 'GitHub token (overrides GITHUB_TOKEN env var)')
+  .action(async (repoPathArg: string | undefined, opts: { depth: string; token?: string }) => {
     const config = loadConfig();
     config.commitDepth = parseInt(opts.depth, 10);
+    if (opts.token) {
+      config.getGitHubToken = async () => opts.token;
+    }
     const engine = new RAGEngine(config);
-    const repoPath = process.cwd();
+    const repoPath = repoPathArg ? path.resolve(repoPathArg) : process.cwd();
 
     console.log(`Indexing ${repoPath} (depth: ${config.commitDepth})...`);
 
@@ -75,9 +79,9 @@ program
     console.log(`\nDone. ${codeResult.changedFiles} code files indexed (${codeResult.totalChunks} chunks).`);
 
     // Also index PRs from GitHub (optional — works without token for public repos)
-    if (!process.env.GITHUB_TOKEN) {
+    if (!opts.token && !process.env.GITHUB_TOKEN) {
       console.log('\n⚠ No GITHUB_TOKEN set — PR indexing will use unauthenticated access (60 req/hr).');
-      console.log('  Set GITHUB_TOKEN for private repos or higher rate limits.');
+      console.log('  Set GITHUB_TOKEN or pass --token for private repos or higher rate limits.');
     }
     try {
       console.log('\nIndexing PRs from GitHub...');

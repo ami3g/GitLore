@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build:core": "cd packages/core && npx tsc -b",
+    "build:cli": "cd packages/cli && npx tsc -b",
     "build:extension": "cd packages/vscode && node esbuild.js",
     "build:webview": "cd packages/vscode && npx vite build --config webview/vite.config.ts",
     "build:desktop": "cd packages/desktop && npm run build",

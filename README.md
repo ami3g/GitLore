@@ -306,7 +306,7 @@ For synthesis questions, code snippets are placed **before** commit history — 
 ### Code Indexing
 - **File discovery**: `git ls-files` + 57 exclusion rules (binaries, lockfiles, `node_modules/`, etc.)
 - **Chunking**: 256-line windows with 50-line overlap; docs use 1024-line windows
-- **AST tagging**: tree-sitter parses 9 languages (TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, TSX) — functions, classes, imports, and exports attached to each chunk
+- **AST tagging**: tree-sitter parses 9 languages (TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, TSX) — functions, classes, imports, and exports attached to each chunk as JSON-encoded strings (parse with `JSON.parse()` when reading from LanceDB directly)
 - **Embedding enrichment**: `[DEFINES] fn1, fn2 [IMPORTS] mod1 [EXPORTS] exp1` prepended before embedding
 - **Incremental**: SHA-256 content hashes — only changed files are re-indexed
 
@@ -482,7 +482,7 @@ cd packages/cli && npm run build     # Build CLI
 
 ```
 .vscode/git-lore/
-├── db/                LanceDB vector database (4 tables)
+├── db/                LanceDB vector database (3 tables; `pr_data` added as a 4th when PR indexing succeeds)
 ├── grammars/          tree-sitter WASM grammars (~1MB each)
 ├── models/            Embedding model (~80MB, downloaded once)
 ├── diagrams/          Saved Mermaid diagrams (desktop app)

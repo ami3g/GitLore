@@ -1,0 +1,1 @@
+{"root":["./src/extension.ts","./src/providers/chatviewprovider.ts","./src/services/embeddingservice.ts","./src/services/gitprocessor.ts","./src/services/ragengine.ts","./src/services/vectorstore.ts","./src/services/llm/llmprovider.ts","./src/services/llm/ollamaprovider.ts","./src/services/llm/openaiprovider.ts","./src/types/index.ts"],"version":"5.9.3"}
